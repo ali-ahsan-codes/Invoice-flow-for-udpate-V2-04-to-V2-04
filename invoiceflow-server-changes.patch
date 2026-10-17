@@ -1,260 +1,373 @@
-diff -ruN -x __pycache__ pa/invoiceflow-server/server/DEPLOY-CHECKLIST.md pb/invoiceflow-server/server/DEPLOY-CHECKLIST.md
---- a/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 17:51:09.202065692 +0000
-+++ b/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 17:51:09.210065732 +0000
-@@ -172,3 +172,11 @@
- - Smoke test: open an invoice, type a serial in *Link another invoice* (preview must appear), link it (no page reload, list updates), add a note with a PDF (appears in the list), scan the Note QR with the phone, pick a file, and confirm it appears as a note attachment.
- - Browser test: `node qa/screenshots/verify_ui.mjs <dir>` against the demo server (`qa/screenshots/demo_server.py`).
+diff -ruN old_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md new_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md
+--- old_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:51:00.000000000 +0000
++++ new_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 18:03:49.544928404 +0000
+@@ -92,3 +92,20 @@
+ Server regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
  
+ Not verified here: MySQL runtime (no MySQL server in the sandbox), and the Android build (no JDK/SDK).
 +
-+## 11. Release addendum: background sync fix
++## Round 6: admin search across all batches
 +
-+- No database change in this release. Do not run any SQL for it.
-+- Replace the application files, including `app/static/js/realtime.js`, then restart the server (Waitress/Gunicorn/service). A restart is needed because the server caches the Python code.
-+- Users who had a page open can press Ctrl+F5 once. Static files are revalidated, but an open tab keeps its old script until reload.
-+- Check after deploy: open the invoice view in two browsers. Change the invoice total in one browser. The total in the other browser should update within a few seconds and show "Live" in the top bar.
-+- If "Reconnecting…" stays on the top bar, check `/live/version` in the browser. It must return JSON with a `revision` after login.
-diff -ruN -x __pycache__ pa/invoiceflow-server/server/TEST-REPORT-invoice-history.md pb/invoiceflow-server/server/TEST-REPORT-invoice-history.md
---- a/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:51:09.202065692 +0000
-+++ b/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:51:09.210065732 +0000
-@@ -72,3 +72,23 @@
++Problem: an administrator who searched for an invoice had to switch to the batch first, because the batch scope applied to admin search too.
++
++Change (admin only, data-entry users unchanged):
++- Invoice list search (serial, book, date) covers every batch. Each result shows a Batch column with the batch name and ID, and a banner says how many batches matched. Browsing without a query still shows the current batch.
++- Book number search matches the same number in every batch. The book summary is shown only when one book matches.
++- `/invoices/search` (AJAX) covers every batch for admins and returns `batch_id` and `batch_name` per result.
++- Mobile API `GET /api/v1/invoices?q=` and `?date=` covers every batch for admins, ignoring the batch selection. Results carry `batch_id` and `batch_name`.
++- Link lookup is intentionally unchanged: links stay inside one batch.
++
++Test: `qa/admin_all_batch_search_test.py` (18 checks, SQLite harness). Browser check on the demo: the admin search for `01` shows Batch 1 #1 and Batch 2 #2 in one list (screenshot `docs/screenshots/15-admin-all-batch-search.png`).
++
++Regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
++
++Date and book summary cards under all-batch search add totals across all batches and say so in their subtitle. The "Full Details" link is hidden for a book that belongs to another batch, because the book page only opens the current batch.
+diff -ruN old_srv/invoiceflow-server/server/app/routes/api.py new_srv/invoiceflow-server/server/app/routes/api.py
+--- old_srv/invoiceflow-server/server/app/routes/api.py	2026-10-17 15:52:54.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/routes/api.py	2026-10-17 18:03:49.540928384 +0000
+@@ -254,6 +254,9 @@
+         limit = 50
  
- Not run here: Gradle build and Android unit tests (no JDK/SDK in the sandbox). Android Kotlin syntax was checked with tree-sitter-kotlin (24 files, 0 parse errors); type checking still needs Android Studio. Also not run: MySQL-backed and live-server suites (see Round 3).
+     q = _scoped_query()
++    if (q_text or date_str) and g.api_user.is_admin():
++        # Admin search covers every batch; each result carries batch_id and batch_name.
++        q = q.execution_options(all_batches=True)
+     if q_text:
+         q = q.filter(Invoice.serial_number.ilike(f'%{q_text}%'))
+     if date_str:
+diff -ruN old_srv/invoiceflow-server/server/app/routes/invoices.py new_srv/invoiceflow-server/server/app/routes/invoices.py
+--- old_srv/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 16:57:44.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 18:03:49.540928384 +0000
+@@ -440,8 +440,11 @@
+     query = request.args.get('query', '')
+     user_id = request.args.get('user_id', type=int) if current_user.is_admin() else None
  
++    # Administrators searching for something see every batch, labelled per row, so they
++    # do not have to switch batches first. Browsing without a query stays in the current batch.
++    search_all = bool(query) and current_user.is_admin()
+     if current_user.is_admin():
+-        base_query = Invoice.query
++        base_query = Invoice.query.execution_options(all_batches=True) if search_all else Invoice.query
+         if user_id:
+             base_query = base_query.filter(Invoice.created_by == user_id)
+     else:
+@@ -457,9 +460,12 @@
+         elif search_type == 'book':
+             try:
+                 book_number = int(str(query).strip().lstrip('#'))
+-                matched_book = Book.query.filter_by(book_number=book_number).first()
+-                if matched_book:
+-                    base_query = base_query.filter(Invoice.book_id == matched_book.id)
++                book_q = Book.query.execution_options(all_batches=True) if search_all else Book.query
++                books = book_q.filter_by(book_number=book_number).order_by(Book.batch_id).all()
++                if books:
++                    base_query = base_query.filter(Invoice.book_id.in_([b.id for b in books]))
++                    # The book summary needs one book; the same number in several batches is not summarised.
++                    matched_book = books[0] if len(books) == 1 else None
+                 else:
+                     base_query = base_query.filter(Invoice.id == -1)
+             except (ValueError, TypeError):
+@@ -528,6 +534,7 @@
+     invoice_query = base_query.order_by(Invoice.date.desc(), Invoice.serial_number.desc())
+     pagination = invoice_query.paginate(page=page, per_page=per_page, error_out=False)
+     invoices = pagination.items
++    search_batch_count = base_query.with_entities(Invoice.batch_id).distinct().count() if search_all else 0
+ 
+     invoice_ids = [inv.id for inv in invoices]
+     media_by_invoice = {}
+@@ -564,6 +571,8 @@
+         users=users,
+         date_summary=date_summary,
+         book_summary=book_summary,
++        search_all=search_all,
++        search_batch_count=search_batch_count,
+     )
+ 
+ 
+@@ -960,12 +969,15 @@
+             results = search_invoices(
+                 query, search_type,
+                 current_user.id if not current_user.is_admin() else None,
++                all_batches=current_user.is_admin(),
+             )
+             data = []
+             for inv in results[:20]:
+                 book, page = get_invoice_book_page(inv)
+                 data.append({
+                     'id': inv.id,
++                    'batch_id': inv.batch_id,
++                    'batch_name': inv.batch.name if inv.batch else '',
+                     'date': inv.date.isoformat(),
+                     'serial_number': inv.serial_number,
+                     'book': book,
+diff -ruN old_srv/invoiceflow-server/server/app/services/invoice_service.py new_srv/invoiceflow-server/server/app/services/invoice_service.py
+--- old_srv/invoiceflow-server/server/app/services/invoice_service.py	2026-10-17 15:53:46.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/services/invoice_service.py	2026-10-17 18:03:49.544928404 +0000
+@@ -427,14 +427,17 @@
+     return Invoice.query.get(invoice_id)
+ 
+ 
+-def search_invoices(query, search_type='serial', user_id=None):
++def search_invoices(query, search_type='serial', user_id=None, all_batches=False):
++    """Serial or date search. all_batches=True (administrators) searches every batch;
++    callers must label results with their batch."""
++    base = Invoice.query.execution_options(all_batches=True) if all_batches else Invoice.query
+     if search_type == 'serial':
+-        q = Invoice.query.filter(Invoice.serial_number.like(f'%{query}%'))
++        q = base.filter(Invoice.serial_number.like(f'%{query}%'))
+     else:
+         search_date = parse_date_string(query, '%Y-%m-%d')
+         if not search_date:
+             return []
+-        q = Invoice.query.filter(Invoice.date == search_date)
++        q = base.filter(Invoice.date == search_date)
+ 
+     if user_id is not None:
+         q = q.filter(Invoice.created_by == user_id)
+diff -ruN old_srv/invoiceflow-server/server/app/static/js/main.js new_srv/invoiceflow-server/server/app/static/js/main.js
+--- old_srv/invoiceflow-server/server/app/static/js/main.js	2026-10-10 08:56:56.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/static/js/main.js	2026-10-17 18:03:49.544928404 +0000
+@@ -527,7 +527,11 @@
+                 data.results.forEach(inv => {
+                     const item = document.createElement('div');
+                     item.className = 'search-result-item';
++                    const label = document.createElement('span');
++                    label.className = 'batch';
++                    label.textContent = inv.batch_name ? `${inv.batch_name} #${inv.batch_id}` : '';
+                     item.innerHTML = `<span class="serial">${inv.serial_number}</span><span class="date">${formatDate(inv.date, 'MM/DD/YYYY')}</span><span class="amount">${formatCurrency(inv.total_amount)}</span>`;
++                    item.appendChild(label);
+                     item.addEventListener('click', () => window.location.href = `/invoices/${inv.id}`);
+                     this.results.appendChild(item);
+                 });
+diff -ruN old_srv/invoiceflow-server/server/app/templates/invoices/list.html new_srv/invoiceflow-server/server/app/templates/invoices/list.html
+--- old_srv/invoiceflow-server/server/app/templates/invoices/list.html	2026-10-17 15:48:54.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/templates/invoices/list.html	2026-10-17 18:03:49.540928384 +0000
+@@ -153,6 +153,7 @@
+                     <small class="text-muted">
+                         Current date format: <strong>{{ system_date_format }}</strong>
+                         &nbsp;·&nbsp; For book search, enter just the book number (e.g. <code>3</code>)
++                        {% if current_user.is_admin() %}<br>As administrator, a search covers <strong>all batches</strong>; each result shows its batch.{% endif %}
+                     </small>
+                 </div>
+                 <div class="col-md-3 d-flex align-items-end">
+@@ -187,7 +188,9 @@
+                 <div>
+                     <h6>Summary for {{ date_summary.date | localdate }}</h6>
+                     <small>
+-                        {% if current_user.is_admin() and not user_id %}
++                        {% if search_all %}
++                            All batches: every invoice for this date, across all batches
++                        {% elif current_user.is_admin() and not user_id %}
+                             All invoices for this date
+                         {% elif user_id %}
+                             Invoices created by the selected user for this date
+@@ -246,13 +249,17 @@
+                 <div>
+                     <h6>
+                         Book #{{ book_summary.book.book_number }}
++                        {% if not search_all or book_summary.book.batch_id == g.batch_id %}
+                         <a href="{{ url_for('admin.book_detail', book_number=book_summary.book.book_number) }}"
+                            class="btn btn-sm btn-outline-primary ms-2">
+                             <i class="fas fa-external-link-alt me-1"></i>Full Details
+                         </a>
++                        {% endif %}
+                     </h6>
+                     <small>
+-                        {% if current_user.is_admin() and not user_id %}
++                        {% if search_all %}
++                            All batches: every invoice in this book number, across all batches
++                        {% elif current_user.is_admin() and not user_id %}
+                             All invoices in this book
+                         {% elif user_id %}
+                             Invoices created by the selected user in this book
+@@ -310,6 +317,13 @@
+     </div>
+     {% endif %}
+ 
++    {% if search_all %}
++    <div class="alert alert-info d-flex align-items-center gap-2 mb-3" id="search-all-batches">
++        <i class="fas fa-layer-group"></i>
++        <span>Searching <strong>all batches</strong>{% if search_batch_count %} · {{ search_batch_count }} batch{{ 'es' if search_batch_count != 1 }} matched{% endif %}. The <strong>Batch</strong> column shows where each invoice belongs.</span>
++    </div>
++    {% endif %}
 +
-+## Round 5: background sync (auto refresh) fix
+     <!-- Invoices Table -->
+     <div class="card border-0 shadow-sm">
+         <div class="card-body p-0">
+@@ -318,6 +332,7 @@
+                     <thead>
+                         <tr>
+                             <th>ID</th>
++                            {% if search_all %}<th>Batch</th>{% endif %}
+                             <th>Date</th>
+                             <th>Serial #</th>
+                             <th>Book</th>
+@@ -337,6 +352,7 @@
+                         {% for invoice in invoices %}
+                         <tr>
+                             <td><span class="text-muted small">#{{ invoice.id }}</span></td>
++                            {% if search_all %}<td><span class="badge bg-primary-subtle text-primary border" data-batch-label="{{ invoice.batch_id }}">{{ invoice.batch.name if invoice.batch else 'Batch' }} <span class="text-muted">#{{ invoice.batch_id }}</span></span></td>{% endif %}
+                             <td>{{ invoice.date | localdate }}</td>
+                             <td>
+                                 <a href="{{ url_for('invoices.view', id=invoice.id) }}"
+@@ -422,7 +438,7 @@
+                         {% endfor %}
+                         {% else %}
+                         <tr>
+-                            <td colspan="{% if current_user.is_admin() %}11{% else %}9{% endif %}"
++                            <td colspan="{{ (11 if current_user.is_admin() else 9) + (1 if search_all else 0) }}"
+                                 class="text-center text-muted py-4">
+                                 <i class="fas fa-inbox fa-2x d-block mb-2"></i>
+                                 <p class="mb-0">No invoices found.</p>
+diff -ruN old_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py new_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py
+--- old_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py	1970-01-01 00:00:00.000000000 +0000
++++ new_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py	2026-10-17 18:03:49.540928384 +0000
+@@ -0,0 +1,148 @@
++"""Admin search covers every batch and labels each result with its batch.
 +
-+Symptom: pages needed a manual refresh after another user or device changed data.
++Covers the web invoice list (serial, book, date), the AJAX search endpoint, the mobile API
++search, and the regression cases: data-entry users stay in their batch, admin browsing without a
++query stays in the current batch, and the link lookup stays inside one batch.
 +
-+Root cause (confirmed in a browser test, not assumed): `realtime.js` treated any non-modal form on a page as an editor. The invoice view has note, link and delete forms, so the whole page was limited to live regions. The invoice's own total therefore stayed stale until a manual reload. Dashboard, summary, invoice list and analytics already updated in the same test.
-+
-+Fix: only the invoice editor (`form.invoice-form`) and upload file inputs (not the note attachment input) count as editors. Typed or focused fields are still protected by `retain()`, and any dirty field still falls back to region-only updates.
-+
-+Browser evidence (`qa/live_sync_browser_check.py`, Chromium, SQLite demo server):
-+- Old `realtime.js`: 9 / 10. Invoice view total did not update (FAIL).
-+- New `realtime.js`: 10 / 10. Dashboard, summary, invoice list, invoice view and analytics update without reload. A note draft keeps its text and focus. An editor amount draft is kept and the editor is not reloaded.
-+
-+Known limit: the grid page shows a serial and date presence matrix, so a total change is not visible there. Its refresh request runs, but it is not asserted by the browser check.
-+
-+Harness changes (test only, `qa/sqlite_harness.py`): MySQL functions `concat`, `lpad`, `date_format`, `dayname` and `hour` are registered for SQLite so the reporting pages run in the demo. Production code is unchanged.
-+
-+Server regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
-+
-+Not verified here: MySQL runtime (no MySQL server in the sandbox), and the Android build (no JDK/SDK).
-diff -ruN -x __pycache__ pa/invoiceflow-server/server/app/static/js/realtime.js pb/invoiceflow-server/server/app/static/js/realtime.js
---- a/invoiceflow-server/server/app/static/js/realtime.js	2026-10-17 17:51:09.202065692 +0000
-+++ b/invoiceflow-server/server/app/static/js/realtime.js	2026-10-17 17:51:09.210065732 +0000
-@@ -109,8 +109,10 @@
-         }
-         // Never morph a form's ancestor: morph libraries can replace wrappers and
-         // detach the original form even when its own removal callback vetoes it.
--        const hasEditor = [...old.querySelectorAll('form')].some(f =>
--            !f.closest('.modal')) || !!old.querySelector('input[type="file"]');
-+        // Only real entry forms (invoice editor) and upload inputs count as editors. Note/link
-+        // forms are opt-in live regions and are protected by retain() while the user types.
-+        const hasEditor = !!old.querySelector('form.invoice-form') ||
-+            [...old.querySelectorAll('input[type="file"]')].some(input => !input.closest('[data-history-form]'));
-         const draft = old.querySelector('[data-live-dirty]');
-         const callbacks={beforeNodeMorphed:retain,beforeNodeRemoved(node){
-             if(node.nodeType===1 && node.matches('.modal,[data-live-preserve]'))return false;
-diff -ruN -x __pycache__ pa/invoiceflow-server/server/qa/live_sync_browser_check.py pb/invoiceflow-server/server/qa/live_sync_browser_check.py
---- a/invoiceflow-server/server/qa/live_sync_browser_check.py	1970-01-01 00:00:00.000000000 +0000
-+++ b/invoiceflow-server/server/qa/live_sync_browser_check.py	2026-10-17 17:51:09.206065712 +0000
-@@ -0,0 +1,152 @@
-+"""Browser check for background live sync (realtime.js) against the SQLite demo server.
-+
-+Run while the demo server is up (python qa/screenshots/demo_server.py, port 5055) and after
-+`rm -rf /tmp/ifh_*` so the database is fresh:
-+
-+    python qa/live_sync_browser_check.py
-+
-+Environment overrides:
-+    IFH_BASE         default http://127.0.0.1:5055
-+    IFH_DB           path to the demo SQLite file (default: newest /tmp/ifh_*/test.db)
-+    CHROMIUM_PATH    optional Chromium executable (default: Playwright's bundled browser)
-+
-+Checks
-+  1. Another "worker" changes invoices and bumps live_revision; each open page must update
-+     without a reload (dashboard, summary, invoice list, invoice view, analytics).
-+  2. Draft safety: a typed note draft and a focused field survive a background refresh,
-+     and an invoice-editor amount draft is kept without reloading the editor.
-+
-+The grid page is not asserted here: it shows a serial/date presence matrix, so an amount
-+change is not visible on it. Its refresh request is exercised by the same loop.
++Runs through the real Flask app on a temporary SQLite database (sqlite_harness.py).
++Run: python qa/admin_all_batch_search_test.py
 +"""
-+import glob
 +import os
-+import subprocess
 +import sys
-+import time
++from datetime import date
++from decimal import Decimal
 +
-+from playwright.sync_api import sync_playwright
++sys.path.insert(0, os.path.dirname(__file__))
++import sqlite_harness as h  # noqa: E402
 +
-+BASE = os.environ.get('IFH_BASE', 'http://127.0.0.1:5055')
-+PAGES = ['/dashboard', '/invoices/summary', '/invoices/?batch_id=1', '/invoices/1', '/admin/analytics/']
-+ADMIN = ('admin', 'Admin@12345')
-+results = []
++app = h.make_app()
++app.config['TESTING'] = True
 +
++from app.extensions import db  # noqa: E402
++from app.models import User, Batch, Book, Invoice  # noqa: E402
 +
-+def demo_db():
-+    if os.environ.get('IFH_DB'):
-+        return os.environ['IFH_DB']
-+    found = sorted(glob.glob('/tmp/ifh_*/test.db'), key=os.path.getmtime)
-+    if not found:
-+        sys.exit('No demo database found. Start qa/screenshots/demo_server.py first.')
-+    return found[-1]
++PASSED = []
 +
 +
-+DB = demo_db()
++def check(label, cond, extra=''):
++    if not cond:
++        raise AssertionError(f'FAIL: {label} {extra}')
++    PASSED.append(label)
++    print('PASS', label)
 +
 +
-+def external_write():
-+    """Mimic a commit from another worker: change one invoice per batch and bump the revision.
++def setup():
++    with app.app_context():
++        admin = User(username='admin', email='admin@x.test', role='admin')
++        admin.set_password('Admin@12345')
++        admin.api_key = 'admin-key-789'
++        sarah = User(username='sarah', email='sarah@x.test', role='data_entry')
++        sarah.set_password('Sarah@12345')
++        sarah.api_key = 'sarah-key-123'
++        db.session.add_all([admin, sarah])
++        db.session.flush()
++        b2 = Batch(id=2, name='Batch Two', numbering_mode='repeat', start_book=1,
++                   start_serial=101, archived=False)
++        db.session.add(b2)
++        db.session.flush()
++        book1 = Book(batch_id=1, book_number=1, capacity=50)
++        book2 = Book(batch_id=2, book_number=1, capacity=50)
++        db.session.add_all([book1, book2])
++        db.session.flush()
 +
-+    The write runs in a clean environment so a LD_LIBRARY_PATH for Chromium cannot shadow
-+    the system sqlite3 module.
-+    """
-+    env = {k: v for k, v in os.environ.items() if k != 'LD_LIBRARY_PATH'}
-+    code = ("import sqlite3,sys,uuid;c=sqlite3.connect(sys.argv[1]);"
-+            "c.execute('UPDATE invoices SET total_amount = total_amount + 1 "
-+            "WHERE id IN (SELECT MIN(id) FROM invoices GROUP BY batch_id)');"
-+            "c.execute('UPDATE live_revision SET token = ? WHERE id = 1',(uuid.uuid4().hex,));"
-+            "c.commit();c.close()")
-+    subprocess.run([sys.executable, '-c', code, DB], check=True, env=env)
++        def mk(batch, book, serial, day, owner):
++            inv = Invoice(batch_id=batch.id, book_id=book.id, book_page=5,
++                          date=date(2026, 10, day), serial_number=serial,
++                          total_amount=Decimal('10.000'), created_by=owner.id, updated_by=owner.id)
++            inv.set_amounts([10.0])
++            db.session.add(inv)
++            db.session.flush()
++            return inv.id
 +
-+
-+def check(name, ok):
-+    results.append((name, bool(ok)))
-+    print('PASS' if ok else 'FAIL', name, flush=True)
-+
-+
-+def login(ctx):
-+    page = ctx.new_page()
-+    page.goto(BASE + '/auth/login')
-+    page.fill('#username', ADMIN[0])
-+    page.fill('#password', ADMIN[1])
-+    page.click('[type=submit]')
-+    page.wait_for_load_state('networkidle')
-+    return page
-+
-+
-+def wait_live(page):
-+    page.wait_for_function("document.querySelector('#live-status')?.textContent === 'Live'", timeout=20000)
-+
-+
-+# Invoice view: probe the invoice's own total. The page also shows other invoices in its
-+# link list, which can change through a live region and would hide a stale main total.
-+PROBES = {'/invoices/1': "document.querySelector('main .display-6')?.innerText || ''"}
++        ids = {
++            'b1_0005': mk(db.session.get(Batch, 1), book1, '0005', 15, sarah),
++            'b2_0005': mk(b2, book2, '0005', 14, sarah),
++            'b2_0009': mk(b2, book2, '0009', 16, sarah),
++        }
++        db.session.commit()
++        return ids
 +
 +
-+def probe(page, path):
-+    return page.evaluate(PROBES.get(path, "document.querySelector('main')?.innerText || ''"))
++def login(client, username, password):
++    r = client.post('/auth/login', data={'username': username, 'password': password})
++    assert r.status_code in (200, 302), r.status_code
 +
 +
-+with sync_playwright() as pw:
-+    launch = {'args': ['--no-sandbox']}
-+    if os.environ.get('CHROMIUM_PATH'):
-+        launch['executable_path'] = os.environ['CHROMIUM_PATH']
-+    browser = pw.chromium.launch(**launch)
-+    ctx = browser.new_context(viewport={'width': 1366, 'height': 900})
-+    page_errors = []
-+    login(ctx)
++def main():
++    ids = setup()
++    admin_c = app.test_client()
++    login(admin_c, 'admin', 'Admin@12345')
++    sarah_c = app.test_client()
++    login(sarah_c, 'sarah', 'Sarah@12345')
 +
-+    # 1) Background content updates
-+    for path in PAGES:
-+        page = ctx.new_page()
-+        page.on('pageerror', lambda e: page_errors.append(str(e)[:200]))
-+        page.goto(BASE + path)
-+        page.wait_for_load_state('networkidle')
-+        try:
-+            wait_live(page)
-+        except Exception:
-+            check(f'{path}: live status reached', False)
-+            page.close()
-+            continue
-+        before = probe(page, path)
-+        external_write()
-+        started = time.time()
-+        updated = False
-+        while time.time() - started < 12:
-+            if probe(page, path) != before:
-+                updated = True
-+                break
-+            page.wait_for_timeout(300)
-+        check(f'{path}: updates without reload ({time.time() - started:.1f}s)', updated)
-+        page.close()
++    # 1) Admin serial search from batch 1 finds the batch 2 invoice too, labelled.
++    r = admin_c.get('/invoices/?batch_id=1&search_type=serial&query=0005')
++    body = r.get_data(as_text=True)
++    check('admin serial search returns 200', r.status_code == 200)
++    check('admin serial search shows batch 1 match', f"/invoices/{ids['b1_0005']}" in body)
++    check('admin serial search shows batch 2 match without switching', f"/invoices/{ids['b2_0005']}" in body)
++    check('admin results carry a batch label', 'data-batch-label="2"' in body and 'Batch Two' in body)
++    check('admin sees the all-batches banner', 'id="search-all-batches"' in body)
 +
-+    # 2) Draft safety
-+    page = ctx.new_page()
-+    page.goto(BASE + '/invoices/1')
-+    wait_live(page)
-+    page.fill('#note-form textarea[name=body]', 'DRAFT-NOTE-KEEP')
-+    page.focus('#note-form textarea[name=body]')
-+    external_write()
-+    page.wait_for_timeout(5000)
-+    check('note draft kept after background refresh',
-+          page.input_value('#note-form textarea[name=body]') == 'DRAFT-NOTE-KEEP')
-+    check('focused field keeps focus', page.evaluate("document.activeElement?.name") == 'body')
-+    page.close()
++    # 2) Batch-only match from the other batch.
++    body = admin_c.get('/invoices/?batch_id=1&search_type=serial&query=0009').get_data(as_text=True)
++    check('admin finds a batch 2 only serial from batch 1 view', f"/invoices/{ids['b2_0009']}" in body)
 +
-+    page = ctx.new_page()
-+    page.goto(BASE + '/invoices/1/edit')
-+    wait_live(page)
-+    page.locator('.amount-field-input').first.fill('555.125')
-+    page.evaluate("window.__marker = 'alive'")
-+    external_write()
-+    page.wait_for_timeout(5000)
-+    check('editor amount draft kept', page.locator('.amount-field-input').first.input_value() == '555.125')
-+    check('editor was not reloaded', page.evaluate("window.__marker") == 'alive')
-+    page.close()
-+    check('no page errors', not page_errors)
-+    browser.close()
++    # 3) Book search covers all batches (book 1 exists in both).
++    body = admin_c.get('/invoices/?batch_id=1&search_type=book&query=1').get_data(as_text=True)
++    check('admin book search finds both batches',
++          f"/invoices/{ids['b1_0005']}" in body and f"/invoices/{ids['b2_0009']}" in body)
 +
-+failed = [name for name, ok in results if not ok]
-+print(f'\n{len(results) - len(failed)}/{len(results)} checks passed')
-+sys.exit(1 if failed else 0)
-diff -ruN -x __pycache__ pa/invoiceflow-server/server/qa/sqlite_harness.py pb/invoiceflow-server/server/qa/sqlite_harness.py
---- a/invoiceflow-server/server/qa/sqlite_harness.py	2026-10-17 17:51:09.198065672 +0000
-+++ b/invoiceflow-server/server/qa/sqlite_harness.py	2026-10-17 17:51:09.206065712 +0000
-@@ -3,6 +3,8 @@
- Runs the real app code against SQLite. Patches just the MySQL-only startup gates
- (URL validation and information_schema / trigger verification). Never used for production.
- """
++    # 4) Admin browsing without a query stays in the current batch.
++    body = admin_c.get('/invoices/?batch_id=1').get_data(as_text=True)
++    check('admin browse without query stays in batch 1',
++          f"/invoices/{ids['b1_0005']}" in body and f"/invoices/{ids['b2_0009']}" not in body)
++    check('admin browse without query has no all-batches banner', 'id="search-all-batches"' not in body)
 +
-+import datetime
- import os
- import re
- import sys
-@@ -50,6 +52,33 @@
-         dbapi_conn.create_function(
-             'regexp', 2,
-             lambda pat, val: 1 if val is not None and re.search(pat, str(val)) else 0)
-+        # MySQL-compatible helpers used by reporting queries (summary/monthly totals).
-+        def _concat(*parts):
-+            return None if any(p is None for p in parts) else ''.join(str(p) for p in parts)
-+        def _lpad(val, length, pad):
-+            if val is None:
-+                return None
-+            text = str(val)
-+            return text[:length] if len(text) >= length else (str(pad) * length + text)[-length:]
-+        dbapi_conn.create_function('concat', -1, _concat)
-+        dbapi_conn.create_function('lpad', 3, _lpad)
-+        def _date_format(value, fmt):
-+            # MySQL DATE_FORMAT subset used by analytics ('%Y-%m', '%Y-%m-%d').
-+            if value is None:
-+                return None
-+            text = str(value)[:10]
-+            return datetime.date.fromisoformat(text).strftime(fmt)
-+        dbapi_conn.create_function('date_format', 2, _date_format)
-+        def _dayname(value):
-+            if value is None:
-+                return None
-+            return datetime.date.fromisoformat(str(value)[:10]).strftime('%A')
-+        dbapi_conn.create_function('dayname', 1, _dayname)
-+        def _hour(value):
-+            if value is None:
-+                return None
-+            return datetime.datetime.fromisoformat(str(value)).hour
-+        dbapi_conn.create_function('hour', 1, _hour)
- 
- 
- class TestCfg(Config):
++    # 5) Data entry user is still limited to their batch.
++    body = sarah_c.get('/invoices/?batch_id=1&search_type=serial&query=0005').get_data(as_text=True)
++    check('data entry search stays in batch 1', f"/invoices/{ids['b2_0005']}" not in body
++          and f"/invoices/{ids['b1_0005']}" in body)
++    check('data entry sees no all-batches banner', 'id="search-all-batches"' not in body)
++
++    # 6) AJAX search endpoint: all batches for admin, each row carries batch_name.
++    r = admin_c.get('/invoices/search?query=0005&search_type=serial',
++                    headers={'X-Requested-With': 'XMLHttpRequest'})
++    data = r.get_json()
++    names = sorted((item['batch_id'], item['batch_name']) for item in data['results'])
++    check('AJAX admin search returns both batches', names == [(1, 'Batch 1'), (2, 'Batch Two')], str(names))
++
++    r = sarah_c.get('/invoices/search?query=0005&search_type=serial&batch_id=1',
++                    headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('AJAX data entry search is not cross-batch by default',
++          all(item['batch_id'] == 1 for item in r.get_json()['results']))
++
++    # 7) Mobile API: admin search ignores batch selection and returns batch labels.
++    api = app.test_client()
++    r = api.get('/api/v1/invoices?q=0005', headers={'X-API-Key': 'admin-key-789'})
++    payload = r.get_json()
++    check('mobile admin search returns 200', r.status_code == 200, str(r.status_code))
++    got = sorted(item['batch_id'] for item in payload['invoices'])
++    check('mobile admin search returns both batches', got == [1, 2], str(got))
++    check('mobile results include batch_name',
++          all(item.get('batch_name') for item in payload['invoices']))
++
++    r = api.get('/api/v1/invoices?q=0005&batch_id=1', headers={'X-API-Key': 'sarah-key-123'})
++    got = sorted(item['batch_id'] for item in r.get_json()['invoices'])
++    check('mobile data entry search stays in batch 1', got == [1], str(got))
++
++    # 8) Link lookup stays inside the viewed batch (linking across batches is not allowed).
++    r = admin_c.get('/invoices/link-lookup?batch_id=1&serial=0009&current=0')
++    check('link lookup does not find a batch 2 invoice from batch 1',
++          r.status_code in (400, 404) or r.get_json().get('found') is False, str(r.status_code))
++
++    print(f'\nALL {len(PASSED)} ADMIN ALL-BATCH SEARCH CHECKS PASSED')
++
++
++if __name__ == '__main__':
++    main()
