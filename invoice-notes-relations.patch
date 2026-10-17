@@ -1,6 +1,6 @@
 diff -ruN orig/invoiceflow-server/server/ROUTES.md invoiceflow-server/server/ROUTES.md
 --- orig/invoiceflow-server/server/ROUTES.md	2026-10-10 08:56:56.000000000 +0000
-+++ invoiceflow-server/server/ROUTES.md	2026-10-17 15:08:09.290190475 +0000
++++ invoiceflow-server/server/ROUTES.md	2026-10-17 15:12:21.945045529 +0000
 @@ -57,6 +57,12 @@
  | `/import-export/sample-csv` | GET | `import_export.sample_csv` |
  | `/invoices/` | GET | `invoices.index` |
@@ -20,10 +20,10 @@ diff -ruN orig/invoiceflow-server/server/ROUTES.md invoiceflow-server/server/ROU
  
 +## Invoice notes, relations and merged amounts
 +- `POST /invoices/<id>/notes` (form: `body`, optional `files` ×N) adds a note with optional attachments. Attachments use the same allowed types as invoice media.
-+- `POST /invoices/<id>/links` (form: `linked_serial`, `link_type` = related | duplicate | adjustment, `amount_action` = none | merge, `link_note`) links two invoices in the same batch. `merge` appends the other invoice's total as one amount line on THIS invoice (Duplicate / Adjusted only). The other invoice is not changed.
++- `POST /invoices/<id>/links` (form: `linked_serial`, `link_type` = related | duplicate | adjustment, `amount_action` = none | merge, `link_note`) links two invoices (\`linked_batch_id\` selects the other invoice's batch; defaults to this batch; hidden batches are admin-only). `merge` appends the other invoice's total as one amount line on THIS invoice (Duplicate / Adjusted only). The other invoice is not changed.
 +- `POST /invoices/<id>/links/<link_id>/delete` removes a link and reverses its merged line (refused if that line was edited since).
 +- `GET /invoices/<id>/history` returns relations, merged amounts, notes and attachments from this invoice and every linked invoice the user may see (JSON).
-+- Invoices with links cannot be deleted until unlinked. Visibility follows the invoice view (owner or administrator).
++- Invoices with links cannot be deleted until unlinked. Visibility follows the invoice view (owner or administrator; hidden batches are administrator-only).
 +- Tables: `invoice_notes`, `invoice_note_media`, `invoice_links`. Run `upgrade_database.py` offline on existing databases.
 +
  ## Batch lifecycle additions
@@ -128,7 +128,7 @@ diff -ruN orig/invoiceflow-server/server/app/routes/admin.py invoiceflow-server/
      Invoice.query.execution_options(all_batches=True).delete()
 diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-server/server/app/routes/invoices.py
 --- orig/invoiceflow-server/server/app/routes/invoices.py	2026-10-10 08:56:56.000000000 +0000
-+++ invoiceflow-server/server/app/routes/invoices.py	2026-10-17 15:05:23.005350612 +0000
++++ invoiceflow-server/server/app/routes/invoices.py	2026-10-17 15:12:13.433002565 +0000
 @@ -1,18 +1,19 @@
  # app/routes/invoices.py
  
@@ -151,18 +151,19 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
  from app.forms import InvoiceForm, InvoiceSearchForm
  from app.services.invoice_service import (
      create_invoice, update_invoice, delete_invoice, get_invoice_by_id,
-@@ -22,6 +23,10 @@
+@@ -22,6 +23,11 @@
      get_recent_invoices,
  )
  from app.services.audit_service import log_action
 +from app.services.invoice_history_service import (
 +    add_note, delete_note, create_link, delete_link, build_history,
 +    count_links, count_notes, can_access_invoice, note_attachment_path,
++    get_invoice_any_batch,
 +)
  from app.utils.decorators import data_entry_required, admin_required, owner_or_admin_required
  from app.utils.helpers import (
      format_currency, get_client_ip, format_date, calculate_book_page,
-@@ -929,6 +934,7 @@
+@@ -929,6 +935,7 @@
      book, page = get_invoice_book_page(invoice)
      amounts = invoice.get_amounts()
      media_files = invoice.media.all()
@@ -170,7 +171,7 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
  
      return render_template(
          'invoices/view.html',
-@@ -937,6 +943,7 @@
+@@ -937,6 +944,7 @@
          page=page,
          amounts=amounts,
          media_files=media_files,
@@ -178,7 +179,7 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
          created_by=User.query.get(invoice.created_by),
          updated_by=User.query.get(invoice.updated_by),
      )
-@@ -970,6 +977,8 @@
+@@ -970,6 +978,8 @@
                      'total_amount': float(inv.total_amount),
                      'amounts': inv.get_amounts(),
                      'created_by': inv.creator.username if inv.creator else None,
@@ -187,7 +188,7 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
                  })
              return jsonify({'results': data, 'count': len(data)})
  
-@@ -1310,3 +1319,125 @@
+@@ -1310,3 +1320,126 @@
      )
  
  
@@ -248,8 +249,8 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
 +        abort(404)
 +
 +    note = db.session.get(InvoiceNote, media.note_id)
-+    owner = db.session.get(Invoice, note.invoice_id) if note else None
-+    if owner is None or owner.batch_id != invoice.batch_id or not can_access_invoice(owner, current_user):
++    owner = get_invoice_any_batch(note.invoice_id) if note else None
++    if owner is None or not can_access_invoice(owner, current_user):
 +        abort(404)
 +
 +    path = note_attachment_path(media)
@@ -282,6 +283,7 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
 +        amount_action=request.form.get('amount_action', 'none'),
 +        link_note=request.form.get('link_note'),
 +        ip_address=get_client_ip(),
++        linked_batch_id=request.form.get('linked_batch_id'),
 +    )
 +    if error:
 +        return _history_reply(id, False, error, 400)
@@ -315,15 +317,17 @@ diff -ruN orig/invoiceflow-server/server/app/routes/invoices.py invoiceflow-serv
 +
 diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py invoiceflow-server/server/app/services/invoice_history_service.py
 --- orig/invoiceflow-server/server/app/services/invoice_history_service.py	1970-01-01 00:00:00.000000000 +0000
-+++ invoiceflow-server/server/app/services/invoice_history_service.py	2026-10-17 15:05:49.101482411 +0000
-@@ -0,0 +1,456 @@
++++ invoiceflow-server/server/app/services/invoice_history_service.py	2026-10-17 15:12:13.433002565 +0000
+@@ -0,0 +1,484 @@
 +# app/services/invoice_history_service.py
 +"""Invoice relations, merged amounts, and notes/attachments (complete invoice history).
 +
 +Rules
-+- Linked invoices must belong to the SAME batch (batches are separate ledgers).
++- Invoices can be linked across batches. Serials repeat per batch, so a link is always made to
++  an explicit (batch, serial) pair.
 +- Non-admin users may only create/see links, notes and attachments on invoices they created
-+  (the same rule the invoice view already applies). Hidden linked invoices are counted, not shown.
++  (the same rule the invoice view already applies) and only in batches that are not hidden.
++  Hidden linked invoices are counted, not shown.
 +- 'merge' copies the linked invoice's total into the RECEIVING invoice as one extra amount line.
 +  The linked invoice itself is never changed, so its own record stays intact.
 +  Unlinking removes that line again (only if it still matches what was merged).
@@ -363,7 +367,21 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +def can_access_invoice(invoice, user):
 +    if invoice is None or user is None or not getattr(user, 'is_authenticated', False):
 +        return False
-+    return user.is_admin() or invoice.created_by == user.id
++    if not user.is_admin():
++        if invoice.created_by != user.id:
++            return False
++        batch = db.session.get(Batch, invoice.batch_id)
++        if batch is None or batch.hidden:
++            return False
++    return True
++
++
++def get_invoice_any_batch(invoice_id):
++    """Load an invoice regardless of the request's current batch scope."""
++    if not invoice_id:
++        return None
++    return (Invoice.query.execution_options(all_batches=True)
++            .filter(Invoice.id == invoice_id).first())
 +
 +
 +def _upload_root():
@@ -545,8 +563,8 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +# ============================================================
 +
 +def create_link(invoice, user, linked_serial, link_type='related', amount_action='none',
-+                link_note=None, ip_address=None):
-+    """Link `invoice` to another invoice (by printed serial in the same batch).
++                link_note=None, ip_address=None, linked_batch_id=None):
++    """Link `invoice` to another invoice by (batch, printed serial). Batch defaults to this invoice's batch.
 +
 +    amount_action='merge' appends the other invoice's total to THIS invoice's amounts.
 +    Returns (link, error).
@@ -561,9 +579,19 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +        return None, 'Amount merge is available for Duplicate or Adjusted relations only.'
 +    link_note = (link_note or '').strip()[:2000] or None
 +
-+    other = get_accessible_invoice_by_serial(invoice.batch_id, linked_serial, user)
++    try:
++        target_batch_id = int(linked_batch_id) if linked_batch_id not in (None, '') else invoice.batch_id
++    except (TypeError, ValueError):
++        return None, 'Choose a valid batch for the other invoice.'
++    if target_batch_id != invoice.batch_id:
++        target_batch = db.session.get(Batch, target_batch_id)
++        if target_batch is None or (target_batch.hidden and not user.is_admin()):
++            return None, 'Choose a valid batch for the other invoice.'
++
++    other = get_accessible_invoice_by_serial(target_batch_id, linked_serial, user)
 +    if other is None:
-+        return None, f'No invoice with serial {str(linked_serial or "").strip() or "?"} in this batch is available to you.'
++        return None, (f'No invoice with serial {str(linked_serial or "").strip() or "?"} '
++                      'in the selected batch is available to you.')
 +    if other.id == invoice.id:
 +        return None, 'An invoice cannot be linked to itself.'
 +
@@ -636,8 +664,8 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +
 +    receiver_id = link.invoice_id
 +    other_id = link.linked_invoice_id
-+    receiver_ref = db.session.get(Invoice, receiver_id)
-+    other_ref = db.session.get(Invoice, other_id)
++    receiver_ref = get_invoice_any_batch(receiver_id)
++    other_ref = get_invoice_any_batch(other_id)
 +    if not (can_access_invoice(receiver_ref, user) and can_access_invoice(other_ref, user)):
 +        return False, 'Link not found.'
 +
@@ -697,6 +725,8 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +def _invoice_summary(inv):
 +    return {
 +        'id': inv.id,
++        'batch_id': inv.batch_id,
++        'batch': inv.batch.name if inv.batch else None,
 +        'serial_number': inv.serial_number,
 +        'date': inv.date.isoformat() if inv.date else None,
 +        'total_amount': float(inv.total_amount) if inv.total_amount is not None else 0.0,
@@ -736,7 +766,7 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +    for link in links:
 +        viewing_receiver = link.invoice_id == invoice.id
 +        other_id = link.linked_invoice_id if viewing_receiver else link.invoice_id
-+        other = db.session.get(Invoice, other_id)
++        other = get_invoice_any_batch(other_id)
 +        if not can_access_invoice(other, user):
 +            hidden_links += 1
 +            continue
@@ -806,8 +836,8 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_service.py invoice
          action='delete_invoice',
 diff -ruN orig/invoiceflow-server/server/app/templates/invoices/view.html invoiceflow-server/server/app/templates/invoices/view.html
 --- orig/invoiceflow-server/server/app/templates/invoices/view.html	2026-10-10 08:56:56.000000000 +0000
-+++ invoiceflow-server/server/app/templates/invoices/view.html	2026-10-17 15:07:45.226068931 +0000
-@@ -307,6 +307,144 @@
++++ invoiceflow-server/server/app/templates/invoices/view.html	2026-10-17 15:12:13.433002565 +0000
+@@ -307,6 +307,152 @@
              </div>
          </div>
      </div>
@@ -831,6 +861,9 @@ diff -ruN orig/invoiceflow-server/server/app/templates/invoices/view.html invoic
 +                                        <div class="fw-semibold">
 +                                            {{ rel.relation }}
 +                                            <a href="{{ url_for('invoices.view', id=rel.other.id) }}">#{{ rel.other.serial_number }}</a>
++                                            {% if rel.other.batch_id != invoice.batch_id %}
++                                            <span class="badge bg-warning text-dark">{{ rel.other.batch }}</span>
++                                            {% endif %}
 +                                        </div>
 +                                        <div class="small text-muted">
 +                                            {{ rel.other.date }} · {{ '%.3f'|format(rel.other.total_amount) }} · by {{ rel.created_by or 'Unknown' }}
@@ -869,8 +902,13 @@ diff -ruN orig/invoiceflow-server/server/app/templates/invoices/view.html invoic
 +                            <form method="POST" action="{{ url_for('invoices.link_create', id=invoice.id, batch_id=invoice.batch_id) }}" class="border-top pt-3 mt-3">
 +                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 +                                <h6 class="small fw-bold mb-2">Link another invoice</h6>
++                                <select name="linked_batch_id" class="form-select form-select-sm mb-2">
++                                    {% for b in batches %}
++                                    <option value="{{ b.id }}" {% if b.id == invoice.batch_id %}selected{% endif %}>{{ b.name }}{% if b.id == invoice.batch_id %} (this invoice's batch){% endif %}</option>
++                                    {% endfor %}
++                                </select>
 +                                <input type="text" name="linked_serial" class="form-control form-control-sm mb-2"
-+                                       inputmode="numeric" placeholder="Serial of the other invoice (same batch), e.g. 0042" required>
++                                       inputmode="numeric" placeholder="Serial of the other invoice, e.g. 0042" required>
 +                                <select name="link_type" class="form-select form-select-sm mb-2">
 +                                    <option value="related">Related (relation only)</option>
 +                                    <option value="duplicate">Duplicate of that invoice</option>
@@ -967,8 +1005,8 @@ diff -ruN orig/invoiceflow-server/server/app/utils/db_utils.py invoiceflow-serve
      if missing: raise RuntimeError(f'Database schema not ready: missing {sorted(missing)}. Back up, stop all writers and run python upgrade_database.py with the migration account.')
 diff -ruN orig/invoiceflow-server/server/qa/invoice_history_test.py invoiceflow-server/server/qa/invoice_history_test.py
 --- orig/invoiceflow-server/server/qa/invoice_history_test.py	1970-01-01 00:00:00.000000000 +0000
-+++ invoiceflow-server/server/qa/invoice_history_test.py	2026-10-17 15:08:14.086214688 +0000
-@@ -0,0 +1,344 @@
++++ invoiceflow-server/server/qa/invoice_history_test.py	2026-10-17 15:12:13.453002667 +0000
+@@ -0,0 +1,435 @@
 +"""Scenario tests for invoice notes/attachments, relations and merged amounts.
 +
 +Runs through the real Flask routes (test client). Runs on a temporary SQLite database via
@@ -1020,11 +1058,30 @@ diff -ruN orig/invoiceflow-server/server/qa/invoice_history_test.py invoiceflow-
 +            db.session.flush()
 +            return i.id
 +
++        from app.models import Batch
++        db.session.add_all([
++            Batch(id=2, name='Batch 2', numbering_mode='repeat', start_book=1, start_serial=101, archived=False),
++            Batch(id=3, name='Hidden Batch', numbering_mode='repeat', start_book=1, start_serial=201,
++                  archived=False, hidden=True),
++        ])
++        db.session.flush()
++
++        def inv_b(batch_id, serial, owner, amounts, day):
++            i = Invoice(batch_id=batch_id, date=date(2026, 10, day), serial_number=serial,
++                        total_amount=Decimal(str(round(sum(amounts), 3))),
++                        created_by=owner.id, updated_by=owner.id)
++            i.set_amounts(amounts)
++            db.session.add(i)
++            db.session.flush()
++            return i.id
++
 +        ids = {
 +            'i1': inv('0001', sarah, [10.0, 5.5]),
 +            'i2': inv('0002', sarah, [20.0]),
 +            'i3': inv('0003', omar, [7.0]),
 +            'i4': inv('0004', sarah, [3.0]),
++            'b2': inv_b(2, '0102', sarah, [40.0], 2),
++            'h3': inv_b(3, '0203', sarah, [9.0], 3),
 +        }
 +        db.session.commit()
 +        return ids
@@ -1307,6 +1364,78 @@ diff -ruN orig/invoiceflow-server/server/qa/invoice_history_test.py invoiceflow-
 +        check('audit row for link actions written', AuditLog.query.filter_by(action='link_invoice').count() >= 2)
 +        check('audit row for unlink written', AuditLog.query.filter_by(action='unlink_invoice').count() >= 1)
 +        check('audit row for note add written', AuditLog.query.filter_by(action='add_invoice_note').count() >= 3)
++
++    # ---------------- Cross-batch linking ----------------
++    b2 = ids['b2']
++    h3 = ids['h3']
++    r = sarah_c.post(f'/invoices/{i1}/links?batch_id=1',
++                     data={'linked_serial': '0102', 'linked_batch_id': '2', 'link_type': 'duplicate',
++                           'amount_action': 'merge'},
++                     headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('cross-batch duplicate + merge link created', r.status_code == 200 and r.get_json()['success'],
++          r.get_data(as_text=True))
++    amounts, total = load(i1)
++    check('cross-batch merge added the other batch total', amounts == [10.0, 5.5, 40.0] and abs(total - 55.5) < 1e-9,
++          str(amounts))
++    a_b2, _ = load(b2)
++    check('invoice in the other batch left unchanged', a_b2 == [40.0])
++
++    r = sarah_c.get(f'/invoices/{i1}/history')
++    rel = r.get_json()['relations'][0]
++    check('history shows the other batch name', rel['other']['batch'] == 'Batch 2' and rel['other']['batch_id'] == 2)
++    r = sarah_c.get(f'/invoices/{i1}')
++    check('receiver page shows batch badge for cross-batch link', b'Batch 2' in r.data and b'Merged +40.000' in r.data)
++
++    r = sarah_c.get(f'/invoices/{b2}/history')
++    check('other-batch invoice history shows the relation back',
++          any(x['other']['id'] == i1 for x in r.get_json()['relations']))
++
++    r = sarah_c.post(f'/invoices/{i2}/links?batch_id=1',
++                     data={'linked_serial': '0203', 'linked_batch_id': '3', 'link_type': 'related'},
++                     headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('clerk cannot link into a hidden batch', r.status_code == 400, r.get_data(as_text=True))
++    r = admin_c.post(f'/invoices/{i2}/links?batch_id=1',
++                     data={'linked_serial': '0203', 'linked_batch_id': '3', 'link_type': 'related'},
++                     headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('admin can link into a hidden batch', r.status_code == 200 and r.get_json()['success'], r.get_data(as_text=True))
++    with app.app_context():
++        InvoiceLink.query.filter_by(invoice_id=i2).delete()
++        db.session.commit()
++
++    r = sarah_c.post(f'/invoices/{i2}/links?batch_id=1',
++                     data={'linked_serial': '0102', 'linked_batch_id': '9', 'link_type': 'related'},
++                     headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('unknown batch rejected', r.status_code == 400)
++
++    r = sarah_c.post(f'/invoices/{i1}/links?batch_id=1',
++                     data={'linked_serial': '0102', 'linked_batch_id': '2', 'link_type': 'related'},
++                     headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('same serial in other batch is a different invoice (duplicate pair refused)',
++          r.status_code == 400 and 'already linked' in r.get_json()['error'])
++
++    # Note on the other-batch invoice with an attachment: visible from the linked invoice.
++    r = sarah_c.post(f'/invoices/{b2}/notes?batch_id=2',
++                     data={'body': 'Batch 2 note', 'files': [(io.BytesIO(b'%PDF-1.4 b2'), 'b2.pdf', 'application/pdf')]},
++                     content_type='multipart/form-data')
++    check('note saved on other-batch invoice', r.status_code == 302, str(r.status_code))
++    r = sarah_c.get(f'/invoices/{i1}/history')
++    b2_notes = [n for n in r.get_json()['notes'] if n['body'] == 'Batch 2 note']
++    check('linked invoice history shows other-batch note', len(b2_notes) == 1 and b2_notes[0]['invoice_serial'] == '0102')
++    att_id = b2_notes[0]['attachments'][0]['id']
++    r = sarah_c.get(f'/invoices/{i1}/notes/attachments/{att_id}')
++    check('other-batch attachment downloads from linked invoice', r.status_code == 200 and r.data.startswith(b'%PDF'))
++
++    # Deleting the linked other-batch invoice is refused while linked.
++    r = sarah_c.post(f'/invoices/{b2}/delete?batch_id=2', headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('other-batch invoice cannot be deleted while linked', r.status_code == 400)
++
++    # Unlink from the other-batch side reverses the merge on the receiver in batch 1.
++    r = sarah_c.get(f'/invoices/{b2}/history')
++    lid_b2 = [x['id'] for x in r.get_json()['relations'] if x['other']['id'] == i1][0]
++    r = sarah_c.post(f'/invoices/{b2}/links/{lid_b2}/delete?batch_id=2', headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('unlink from other-batch side succeeds', r.status_code == 200, r.get_data(as_text=True))
++    amounts, total = load(i1)
++    check('cross-batch unlink reversed the merge', amounts == [10.0, 5.5] and abs(total - 15.5) < 1e-9, str(amounts))
 +
 +    print(f'\nALL {len(PASSED)} CHECKS PASSED')
 +
