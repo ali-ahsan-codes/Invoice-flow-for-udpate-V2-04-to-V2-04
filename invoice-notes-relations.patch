@@ -1,3 +1,146 @@
+diff -ruN orig/invoiceflow-server/server/DEPLOY-CHECKLIST.md invoiceflow-server/server/DEPLOY-CHECKLIST.md
+--- orig/invoiceflow-server/server/DEPLOY-CHECKLIST.md	1970-01-01 00:00:00.000000000 +0000
++++ invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 15:17:20.233375923 +0000
+@@ -0,0 +1,139 @@
++# Deploy checklist — Invoice notes, attachments & invoice relations
++
++This release adds **three new MySQL tables** and no changes to existing tables or data.
++Read `DEPLOYMENT.md` and `INSTALLATION-GUIDE.html` for general installation. This page covers
++only what changed and what you must do.
++
++## 1. What changed
++
++| Area | Change |
++|---|---|
++| Database | New tables: `invoice_notes`, `invoice_note_media`, `invoice_links`. Existing tables are not altered. |
++| Web app | Notes (text + attachments) on each invoice; links to other invoices (same or other batch) as Related / Duplicate / Adjusted; optional amount merge; history on the invoice page. |
++| API | New JSON endpoint `GET /invoices/<id>/history`. Existing `/api/v1/*` endpoints are unchanged, so the Android app needs no change to keep working. |
++| Files | Note attachments are stored under `UPLOAD_FOLDER/invoice_<id>/notes/`. |
++
++## 2. Before you start (mandatory)
++
++1. Announce downtime and stop all users from writing (close the app).
++2. Take a **full MySQL backup** of the InvoiceFlow schema (Workbench: *Server → Data Export*).
++3. Back up the uploads folder (`UPLOAD_FOLDER`, default `uploads/`).
++4. Keep the current source folder until the new one is verified.
++
++## 3. Create the new tables — choose ONE option
++
++### Option A — MySQL Workbench (manual, recommended if you prefer SQL)
++
++1. Open `sql/upgrade_invoice_history.sql` in Workbench.
++2. Select the InvoiceFlow schema: `USE your_invoiceflow_database;` (or pick it in the schema list first).
++3. Run the whole script (lightning bolt icon / Ctrl+Shift+Enter).
++4. Run the verification query at the bottom of the file. It must return **3 rows**:
++   ```sql
++   SELECT table_name FROM information_schema.tables
++    WHERE table_schema = DATABASE()
++      AND table_name IN ('invoice_notes','invoice_note_media','invoice_links');
++   ```
++5. Check the constraints exist:
++   ```sql
++   SHOW CREATE TABLE invoice_links\G
++   ```
++   You should see `uq_invoice_link_pair`, `ck_invoice_link_distinct` and two `ON DELETE CASCADE` foreign keys.
++
++Running the script again is safe (`CREATE TABLE IF NOT EXISTS`).
++
++### Option B — Python upgrade (automatic)
++
++```bash
++# Linux / macOS
++cd /path/to/invoiceflow/server
++source .venv/bin/activate
++DATABASE_URL='mysql+pymysql://migration_user:PASSWORD@127.0.0.1:3306/invoiceflow' python upgrade_database.py
++
++# Windows
++.venv\Scripts\python.exe upgrade_database.py      (with DATABASE_URL set in .env)
++```
++
++`upgrade_database.py` calls `db.create_all()`, which creates the three missing tables and
++leaves existing tables untouched. It then verifies the triggers and identity reservations
++that were already in place. It needs the migration account (CREATE privilege), not the runtime account.
++
++Use Option A **or** Option B, not both. Both produce identical tables.
++
++## 4. Why the app refuses to start until step 3 is done
++
++On startup the app runs a read-only check. If the three tables are missing it stops with:
++
++```
++Database schema not ready: missing ['invoice_links', ...]. Back up, stop all writers and run python upgrade_database.py ...
++```
++
++This is intentional. The app never creates tables at normal startup. If you see this message,
++run Option A or B and start again.
++
++## 5. Permissions
++
++- **Migration account** (Option B or Workbench as admin): CREATE, REFERENCES, INDEX on the schema.
++- **Runtime account** (the one in `DATABASE_URL` for the server): needs `SELECT, INSERT, UPDATE, DELETE`
++  on the three new tables, in addition to its existing grants. If you use a least-privilege account:
++  ```sql
++  GRANT SELECT, INSERT, UPDATE, DELETE ON your_invoiceflow_database.invoice_notes TO 'invoiceflow_runtime'@'%';
++  GRANT SELECT, INSERT, UPDATE, DELETE ON your_invoiceflow_database.invoice_note_media TO 'invoiceflow_runtime'@'%';
++  GRANT SELECT, INSERT, UPDATE, DELETE ON your_invoiceflow_database.invoice_links TO 'invoiceflow_runtime'@'%';
++  FLUSH PRIVILEGES;
++  ```
++  (Replace the names with yours. Skip this if the runtime account already has schema-wide DML grants.)
++
++## 6. Start and verify
++
++```bash
++# Validate configuration without binding a port
++python launch.py --check
++python diagnose.py
++
++# Development / local
++python launch.py --no-browser
++
++# Production (Linux)
++gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:8000 wsgi:app
++```
++
++Smoke test in the browser:
++
++1. Log in as a data-entry user; open any invoice.
++2. **Notes:** add a text note, then a note with a PDF/PNG. Download the attachment.
++3. **Links:** link the invoice to another invoice (same batch first). Try *Duplicate* with *Merge*:
++   the amount line should be added and the total updated. Then remove the link: the amount should go back.
++4. Try to delete a linked invoice: it must be refused until it is unlinked.
++5. Open the Android app and load one invoice and upload one photo: it must work as before.
++
++## 7. Rollback
++
++Rollback is only needed if the new code must be removed. Dropping the new tables deletes all notes,
++attachments records and links, so take a backup first.
++
++1. Stop the server and deploy the previous source folder.
++2. Only if you must remove the feature data:
++   ```sql
++   DROP TABLE invoice_note_media;
++   DROP TABLE invoice_notes;
++   DROP TABLE invoice_links;
++   ```
++   Also delete `uploads/invoice_*/notes/` if you want the files removed.
++3. Invoices, amounts, media and audit logs are not affected by the rollback itself.
++   Note: merged amount lines stay on the receiving invoice (they are normal amount lines); review
++   them manually if you removed links before rolling back.
++
++## 8. Known limits (read before go-live)
++
++- **Merged amounts are counted twice in totals** unless you exclude the source invoice in reports.
++  The merge adds the source total to the receiving invoice; the source keeps its own amount.
++- Links to invoices in **hidden batches** are only possible for administrators.
++- An invoice with links cannot be deleted until its links are removed.
++- Tested on SQLite in development and on the MySQL DDL generated from the models. Run the
++  staging test below against your real MySQL 8.x or MariaDB before production.
++
++## 9. Staging test (recommended)
++
++1. Restore the production backup into a staging schema.
++2. Run section 3 and section 6 against staging.
++3. Run the smoke test in section 6 and one cross-batch link.
 diff -ruN orig/invoiceflow-server/server/ROUTES.md invoiceflow-server/server/ROUTES.md
 --- orig/invoiceflow-server/server/ROUTES.md	2026-10-10 08:56:56.000000000 +0000
 +++ invoiceflow-server/server/ROUTES.md	2026-10-17 15:12:21.945045529 +0000
@@ -29,6 +172,28 @@ diff -ruN orig/invoiceflow-server/server/ROUTES.md invoiceflow-server/server/ROU
  ## Batch lifecycle additions
  Admin-only POST `/batches/<id>/lock`, `/unlock`, `/hide`, `/unhide`, `/archive`, `/unarchive`; GET `/batches/<id>/view`. Normal-user hidden-batch direct access returns 404; locked/archived mutations return permission errors. See `app/batches.py` and `BATCH-CONTROLS-UPGRADE.md`.
  
+diff -ruN orig/invoiceflow-server/server/TEST-REPORT-invoice-history.md invoiceflow-server/server/TEST-REPORT-invoice-history.md
+--- orig/invoiceflow-server/server/TEST-REPORT-invoice-history.md	1970-01-01 00:00:00.000000000 +0000
++++ invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 15:18:39.209774834 +0000
+@@ -0,0 +1,18 @@
++# Test report — invoice notes, attachments & relations
++
++## Automated (run locally, SQLite harness)
++- `python qa/invoice_history_test.py` → **79 checks passed**
++  (notes/attachments, access rules, link/merge/unlink, index shift on multiple merges,
++  tampered-line refusal, cross-batch links, hidden-batch refusal, batch lock, delete guards, audit rows).
++- `python qa/mobile_qr_contract_test.py` → 3 checks passed (existing, DB-free).
++- Static check (pyflakes) on changed modules: no undefined names. Pre-existing unused imports left as-is.
++- MySQL DDL for the three tables generated from the models and the upgrade SQL parsed with a MySQL grammar.
++
++## Screenshots
++`qa/screenshots/` — captured from the demo server (`demo_server.py`) with headless Chromium:
++01 login, 02 invoice page top, 03 relations & notes section, 04 related link, 05 other-batch invoice, 06 mobile history.
++
++## Not tested in this environment
++- **MySQL 8.x / MariaDB runtime** (no server available): run `sql/upgrade_invoice_history.sql` or `upgrade_database.py` in staging first.
++- **Android app**: could not be built or unit-tested here (no JDK / Android SDK / Gradle downloads). Static check: all endpoints the app calls (`/api/v1/invoices/<serial>`, `/next`, `/media`, `/me`, `/config`) exist and are unchanged.
++- Full legacy Selenium/Playwright QA suites in `qa/` need the original MySQL preview database and sandbox paths; not run.
 diff -ruN orig/invoiceflow-server/server/app/models.py invoiceflow-server/server/app/models.py
 --- orig/invoiceflow-server/server/app/models.py	2026-10-10 08:56:56.000000000 +0000
 +++ invoiceflow-server/server/app/models.py	2026-10-17 15:04:27.121068305 +0000
@@ -805,7 +970,16 @@ diff -ruN orig/invoiceflow-server/server/app/services/invoice_history_service.py
 +    }
 diff -ruN orig/invoiceflow-server/server/app/services/invoice_service.py invoiceflow-server/server/app/services/invoice_service.py
 --- orig/invoiceflow-server/server/app/services/invoice_service.py	2026-10-10 08:56:56.000000000 +0000
-+++ invoiceflow-server/server/app/services/invoice_service.py	2026-10-17 15:04:54.157204892 +0000
++++ invoiceflow-server/server/app/services/invoice_service.py	2026-10-17 15:16:49.233219354 +0000
+@@ -229,7 +229,7 @@
+     data['date'] = invoice_date
+     conflict = InvoiceIdentityReservation.query.filter(
+         InvoiceIdentityReservation.date == invoice_date, InvoiceIdentityReservation.serial_numeric == int(raw_serial),
+-        InvoiceIdentityReservation.invoice_id != (invoice_id if 'invoice_id' in locals() else -1)).first()
++        InvoiceIdentityReservation.invoice_id != -1).first()
+     if conflict:
+         return None, 'This date and serial are reserved by an existing invoice (including its previous values). Delete the original invoice before reusing the combination.'
+ 
 @@ -388,6 +388,12 @@
      error = mutation_error(batch, db.session.get(User, user_id))
      if error: return False, error
@@ -1442,6 +1616,153 @@ diff -ruN orig/invoiceflow-server/server/qa/invoice_history_test.py invoiceflow-
 +
 +if __name__ == '__main__':
 +    main()
+Binary files orig/invoiceflow-server/server/qa/screenshots/01-login.png and invoiceflow-server/server/qa/screenshots/01-login.png differ
+Binary files orig/invoiceflow-server/server/qa/screenshots/02-invoice-0001-top.png and invoiceflow-server/server/qa/screenshots/02-invoice-0001-top.png differ
+Binary files orig/invoiceflow-server/server/qa/screenshots/03-relations-notes-section.png and invoiceflow-server/server/qa/screenshots/03-relations-notes-section.png differ
+Binary files orig/invoiceflow-server/server/qa/screenshots/04-invoice-0003-related-link.png and invoiceflow-server/server/qa/screenshots/04-invoice-0003-related-link.png differ
+Binary files orig/invoiceflow-server/server/qa/screenshots/05-other-batch-invoice-0102.png and invoiceflow-server/server/qa/screenshots/05-other-batch-invoice-0102.png differ
+Binary files orig/invoiceflow-server/server/qa/screenshots/06-mobile-history.png and invoiceflow-server/server/qa/screenshots/06-mobile-history.png differ
+diff -ruN orig/invoiceflow-server/server/qa/screenshots/demo_server.py invoiceflow-server/server/qa/screenshots/demo_server.py
+--- orig/invoiceflow-server/server/qa/screenshots/demo_server.py	1970-01-01 00:00:00.000000000 +0000
++++ invoiceflow-server/server/qa/screenshots/demo_server.py	2026-10-17 15:18:39.209774834 +0000
+@@ -0,0 +1,73 @@
++"""Demo server for screenshots ONLY. SQLite + sample data. Not for production."""
++import io
++import os
++import sys
++from datetime import date
++from decimal import Decimal
++
++sys.path.insert(0, '/home/user/work/tests')
++os.chdir('/home/user/work/invoiceflow-server/server')
++sys.path.insert(0, '/home/user/work/invoiceflow-server/server')
++import sqlite_harness as h  # noqa: E402
++
++app = h.make_app()
++
++from PIL import Image, ImageDraw  # noqa: E402
++from app.extensions import db  # noqa: E402
++from app.models import User, Invoice, Batch, InvoiceNote, InvoiceNoteMedia, InvoiceLink  # noqa: E402
++from app.services.invoice_history_service import add_note, create_link  # noqa: E402
++from werkzeug.datastructures import FileStorage  # noqa: E402
++
++with app.app_context():
++    admin = User(username='admin', email='admin@demo.test', role='admin')
++    admin.set_password('Admin@12345')
++    sarah = User(username='sarah', email='sarah@demo.test', role='data_entry')
++    sarah.set_password('Sarah@12345')
++    db.session.add_all([admin, sarah])
++    db.session.add_all([
++        Batch(id=2, name='Batch 2', numbering_mode='repeat', start_book=1, start_serial=101, archived=False),
++    ])
++    db.session.flush()
++
++    def mk(batch, serial, day, amounts):
++        i = Invoice(batch_id=batch, date=date(2026, 10, day), serial_number=serial,
++                    total_amount=Decimal(str(round(sum(amounts), 3))),
++                    created_by=sarah.id, updated_by=sarah.id)
++        i.set_amounts(amounts)
++        db.session.add(i)
++        db.session.flush()
++        return i
++
++    inv1 = mk(1, '0001', 14, [120.500, 45.250])
++    inv2 = mk(1, '0002', 15, [88.000])
++    inv3 = mk(1, '0003', 15, [36.750, 12.000])
++    old = mk(2, '0102', 2, [210.000])
++    db.session.commit()
++
++    # Attachment: a generated PNG "scanned" page.
++    img = Image.new('RGB', (640, 420), 'white')
++    d = ImageDraw.Draw(img)
++    d.text((30, 30), 'Customer re-issue reference', fill='black')
++    d.text((30, 70), 'Old invoice #0102 (Batch 2) - OMR 210.000', fill='black')
++    d.rectangle((30, 120, 600, 360), outline='black', width=3)
++    d.text((50, 150), 'Scanned copy of printed invoice', fill='black')
++    buf = io.BytesIO()
++    img.save(buf, format='PNG')
++    buf.seek(0)
++
++    admin_user = db.session.get(User, admin.id)
++    sarah_user = db.session.get(User, sarah.id)
++    add_note(db.session.get(Invoice, inv1.id), sarah_user,
++             'Customer asked to re-issue this invoice. Old invoice was never paid.', [])
++    add_note(db.session.get(Invoice, inv1.id), sarah_user, 'Scanned reference attached.',
++             [FileStorage(stream=buf, filename='scan-0102.png', content_type='image/png')])
++    add_note(db.session.get(Invoice, old.id), sarah_user, 'Original invoice, amount carried forward.', [])
++
++    # Duplicate of the other-batch invoice, amount merged into 0001.
++    link, err = create_link(db.session.get(Invoice, inv1.id), sarah_user, '0102', 'duplicate', 'merge',
++                            'Re-issued after customer request', linked_batch_id=2)
++    assert err is None, err
++    create_link(db.session.get(Invoice, inv3.id), sarah_user, '0002', 'related', 'none', 'Same customer, same day')
++
++if __name__ == '__main__':
++    app.run(host='0.0.0.0', port=5055, debug=False, threaded=True, use_reloader=False)
+diff -ruN orig/invoiceflow-server/server/qa/screenshots/take_shots.mjs invoiceflow-server/server/qa/screenshots/take_shots.mjs
+--- orig/invoiceflow-server/server/qa/screenshots/take_shots.mjs	1970-01-01 00:00:00.000000000 +0000
++++ invoiceflow-server/server/qa/screenshots/take_shots.mjs	2026-10-17 15:18:39.209774834 +0000
+@@ -0,0 +1,60 @@
++import chromium from '@sparticuz/chromium';
++import { chromium as pw } from 'playwright-core';
++
++const BASE = 'http://127.0.0.1:5055';
++const OUT = '/home/user/work/shots/out';
++const { mkdirSync } = await import('node:fs');
++mkdirSync(OUT, { recursive: true });
++
++const browser = await pw.launch({
++  executablePath: await chromium.executablePath(),
++  args: chromium.args,
++  headless: true,
++});
++
++async function login(page) {
++  await page.goto(`${BASE}/auth/login`, { waitUntil: 'domcontentloaded' });
++  await page.fill('input[name=username]', 'sarah');
++  await page.fill('input[name=password]', 'Sarah@12345');
++  await Promise.all([
++    page.waitForLoadState('domcontentloaded'),
++    page.click('button[type=submit], input[type=submit]'),
++  ]);
++}
++
++const desktop = await browser.newContext({ viewport: { width: 1366, height: 900 }, deviceScaleFactor: 1 });
++const page = await desktop.newPage();
++
++await page.goto(`${BASE}/auth/login`, { waitUntil: 'domcontentloaded' });
++await page.waitForTimeout(800);
++await page.screenshot({ path: `${OUT}/01-login.png`, fullPage: false });
++
++await login(page);
++await page.goto(`${BASE}/invoices/1?batch_id=1`, { waitUntil: 'domcontentloaded' });
++await page.waitForTimeout(1200);
++await page.screenshot({ path: `${OUT}/02-invoice-0001-top.png`, fullPage: false });
++
++const section = page.locator('#invoice-history');
++await section.scrollIntoViewIfNeeded();
++await page.waitForTimeout(400);
++await section.screenshot({ path: `${OUT}/03-relations-notes-section.png` });
++
++await page.goto(`${BASE}/invoices/3?batch_id=1`, { waitUntil: 'domcontentloaded' });
++await page.waitForTimeout(800);
++await page.locator('#invoice-history').screenshot({ path: `${OUT}/04-invoice-0003-related-link.png` });
++
++// Linked invoice in another batch, opened from the relation list
++await page.goto(`${BASE}/invoices/4?batch_id=2`, { waitUntil: 'domcontentloaded' });
++await page.waitForTimeout(800);
++await page.locator('#invoice-history').screenshot({ path: `${OUT}/05-other-batch-invoice-0102.png` });
++
++// Mobile
++const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
++const mp = await mobile.newPage();
++await login(mp);
++await mp.goto(`${BASE}/invoices/1?batch_id=1`, { waitUntil: 'domcontentloaded' });
++await mp.waitForTimeout(1200);
++await mp.locator('#invoice-history').screenshot({ path: `${OUT}/06-mobile-history.png` });
++
++await browser.close();
++console.log('screenshots done');
 diff -ruN orig/invoiceflow-server/server/qa/sqlite_harness.py invoiceflow-server/server/qa/sqlite_harness.py
 --- orig/invoiceflow-server/server/qa/sqlite_harness.py	1970-01-01 00:00:00.000000000 +0000
 +++ invoiceflow-server/server/qa/sqlite_harness.py	2026-10-17 15:08:14.086214688 +0000
@@ -1576,3 +1897,80 @@ diff -ruN orig/invoiceflow-server/server/sql/new_database_schema.sql invoiceflow
  -- IMPORTANT: run the offline Python schema upgrade to install and verify
  -- invoices_reserve_ai and invoices_reserve_au BEFORE opening entry.
  
+diff -ruN orig/invoiceflow-server/server/sql/upgrade_invoice_history.sql invoiceflow-server/server/sql/upgrade_invoice_history.sql
+--- orig/invoiceflow-server/server/sql/upgrade_invoice_history.sql	1970-01-01 00:00:00.000000000 +0000
++++ invoiceflow-server/server/sql/upgrade_invoice_history.sql	2026-10-17 15:17:00.557276543 +0000
+@@ -0,0 +1,73 @@
++-- =====================================================================
++-- InvoiceFlow: MySQL upgrade for INVOICE NOTES, ATTACHMENTS & RELATIONS
++-- =====================================================================
++-- Use this on an EXISTING InvoiceFlow database (MySQL Workbench / any MySQL client).
++-- It only ADDS three new tables. It does not ALTER or DELETE any existing table or row.
++--
++-- Before running:
++--   1. Stop the InvoiceFlow server (no users writing) and take a full backup.
++--   2. Select the InvoiceFlow schema first:  USE your_invoiceflow_database;
++--   3. Run the whole file once. Re-running is safe (IF NOT EXISTS).
++--
++-- Afterwards, verify with the queries at the bottom of this file, then start the app.
++-- The app refuses to start until these tables exist (startup gate).
++-- The uploads folder also needs to be writable (notes attachments go to invoice_<id>/notes/).
++
++-- Invoice notes/comments, their attachments, and invoice-to-invoice relations.
++CREATE TABLE IF NOT EXISTS invoice_notes (
++ id INTEGER NOT NULL AUTO_INCREMENT,
++ invoice_id INTEGER NOT NULL,
++ body TEXT,
++ created_by INTEGER NOT NULL,
++ created_at DATETIME,
++ PRIMARY KEY (id),
++ INDEX ix_invoice_notes_invoice_id (invoice_id),
++ INDEX ix_invoice_notes_created_at (created_at),
++ FOREIGN KEY(invoice_id) REFERENCES invoices (id) ON DELETE CASCADE,
++ FOREIGN KEY(created_by) REFERENCES users (id)
++) ENGINE=InnoDB;
++
++CREATE TABLE IF NOT EXISTS invoice_note_media (
++ id INTEGER NOT NULL AUTO_INCREMENT,
++ note_id INTEGER NOT NULL,
++ file_name VARCHAR(255) NOT NULL,
++ file_path VARCHAR(500) NOT NULL,
++ file_size INTEGER NOT NULL,
++ mime_type VARCHAR(100) NOT NULL,
++ uploaded_by INTEGER NOT NULL,
++ uploaded_at DATETIME,
++ PRIMARY KEY (id),
++ INDEX ix_invoice_note_media_note_id (note_id),
++ FOREIGN KEY(note_id) REFERENCES invoice_notes (id) ON DELETE CASCADE,
++ FOREIGN KEY(uploaded_by) REFERENCES users (id)
++) ENGINE=InnoDB;
++
++CREATE TABLE IF NOT EXISTS invoice_links (
++ id INTEGER NOT NULL AUTO_INCREMENT,
++ invoice_id INTEGER NOT NULL,
++ linked_invoice_id INTEGER NOT NULL,
++ link_type VARCHAR(20) NOT NULL,
++ amount_action VARCHAR(10) NOT NULL,
++ merged_amount NUMERIC(10, 3),
++ merged_line_index INTEGER,
++ note TEXT,
++ created_by INTEGER NOT NULL,
++ created_at DATETIME,
++ PRIMARY KEY (id),
++ CONSTRAINT uq_invoice_link_pair UNIQUE (invoice_id, linked_invoice_id),
++ CONSTRAINT ck_invoice_link_distinct CHECK (invoice_id <> linked_invoice_id),
++ INDEX ix_invoice_links_invoice_id (invoice_id),
++ INDEX ix_invoice_links_linked_invoice_id (linked_invoice_id),
++ INDEX ix_invoice_links_created_at (created_at),
++ FOREIGN KEY(invoice_id) REFERENCES invoices (id) ON DELETE CASCADE,
++ FOREIGN KEY(linked_invoice_id) REFERENCES invoices (id) ON DELETE CASCADE,
++ FOREIGN KEY(created_by) REFERENCES users (id)
++) ENGINE=InnoDB;
++
++
++-- ---------------------------------------------------------------------
++-- Verification (should return 3 rows and 0 errors):
++--   SELECT table_name FROM information_schema.tables
++--    WHERE table_schema = DATABASE()
++--      AND table_name IN ('invoice_notes','invoice_note_media','invoice_links');
++-- ---------------------------------------------------------------------
