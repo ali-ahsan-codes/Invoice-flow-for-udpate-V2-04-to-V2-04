@@ -1,561 +1,237 @@
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/DEPLOY-CHECKLIST.md /home/user/work/invoiceflow-server/server/DEPLOY-CHECKLIST.md
---- base/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 15:55:34.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 17:08:28.828712421 +0000
-@@ -15,10 +15,12 @@
- | Mobile API (`/api/v1`) | New, all with `X-API-Key` and `batch_id`: `GET /invoices/<serial>/history`, `POST /invoices/<serial>/notes`, `DELETE /invoices/<serial>/notes/<id>`, `GET /invoices/<serial>/notes/attachments/<media_id>`, `POST /invoices/<serial>/links`, `DELETE /invoices/<serial>/links/<id>`. `GET /me` now also returns `capabilities`. Existing endpoints are unchanged. |
- | Upload types | `ALLOWED_EXTENSIONS` covers ordinary documents and images (PDF, Word, Excel, CSV, PowerPoint, text, images incl. WEBP/HEIC, zip/7z/rar). Executables, scripts, HTML and SVG are refused. Type is decided by the file extension. |
- | Fixes | Sample CSV download (`/import-export/sample-csv`) no longer fails with a NameError. CSV export no longer crashes for users without export permission. Dead code removed (unused imports and functions). |
--| Android | *Notes & links* screen for the focused invoice. Actions follow the admin's switches; a clerk whose mobile access is off cannot connect. Install the new APK. |
-+| Android | *Notes & links* screen for the focused invoice. Actions follow the admin's switches; a clerk whose mobile access is off cannot connect. **Note attachment QR:** on the invoice page (Notes & comments → *Note QR*) print or show the QR; scanning it with the app opens that invoice's Notes sheet and the file picker, and the chosen files are saved as a note. Install the new APK. |
-+| Web | Link form shows the other invoice (date, serial, book/page, total) as you type the serial, and refuses unknown or hidden serials. Linking and adding notes happen in the background: the typed text stays and the lists update without a page reload. Attachment types follow the server allow-list (no narrow browser filter). |
-+| Security | Invoice QR image URLs (`/media/qr/...`) now require login and access to the invoice (before they were public). |
- | Files | Note attachments are stored under `UPLOAD_FOLDER/invoice_<id>/notes/`. |
+diff -ruN old_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md new_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md
+--- old_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:51:00.000000000 +0000
++++ new_srv/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 18:03:49.544928404 +0000
+@@ -92,3 +92,20 @@
+ Server regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
  
--### 1a. Permissions (Admin → Users → key icon)
-+### 1a. Permissions (Admin → Users → Permissions button on each user row)
- 
- Each data-entry user has these switches (admins always have everything):
- 
-@@ -126,7 +128,7 @@
- 
- Smoke test:
- 
--1. Sign in as admin → **Users** → key icon on a data-entry user → turn **Link invoices** off → Save.
-+1. Sign in as admin → **Users** → Permissions button on a data-entry user → turn **Link invoices** off → Save.
- 2. Sign in as that user → open an invoice → the link form is hidden. Turn it back on as admin.
- 3. Open an invoice → add a note with a PDF → it appears; download the attachment.
- 4. Link two invoices (relation only, no amount) → both show the link.
-@@ -161,3 +163,12 @@
- 1. Restore the production backup into a staging schema.
- 2. Run section 3 and section 6 against staging.
- 3. Run the smoke test in section 6 and one cross-batch link.
+ Not verified here: MySQL runtime (no MySQL server in the sandbox), and the Android build (no JDK/SDK).
 +
-+## 10. Release addendum: note-attachment QR, link lookup, background sync
++## Round 6: admin search across all batches
 +
-+- No database change in this addendum. Steps 3 and 6 above are unchanged.
-+- Deploy the server first, then install the new Android APK on the phones (the old app ignores the new `target` field and keeps uploading to the invoice, so it is safe to roll out in either order).
-+- Print or show the **Note QR** for an invoice from its page. The QR is per invoice and works for any batch the user can access.
-+- Smoke test: open an invoice, type a serial in *Link another invoice* (preview must appear), link it (no page reload, list updates), add a note with a PDF (appears in the list), scan the Note QR with the phone, pick a file, and confirm it appears as a note attachment.
-+- Browser test: `node qa/screenshots/verify_ui.mjs <dir>` against the demo server (`qa/screenshots/demo_server.py`).
++Problem: an administrator who searched for an invoice had to switch to the batch first, because the batch scope applied to admin search too.
 +
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/ROUTES.md /home/user/work/invoiceflow-server/server/ROUTES.md
---- base/invoiceflow-server/server/ROUTES.md	2026-10-17 15:55:40.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/ROUTES.md	2026-10-17 17:08:28.828712421 +0000
-@@ -60,6 +60,7 @@
- | `/invoices/<int:id>/history` | GET | `invoices.history_json` |
- | `/invoices/<int:id>/links` | POST | `invoices.link_create` |
- | `/invoices/<int:id>/links/<int:link_id>/delete` | POST | `invoices.link_delete` |
-+| `/invoices/link-lookup` | GET | `invoices.link_lookup` (JSON preview of another invoice for the link form: `batch_id`, `serial`, `current`) |
- | `/invoices/<int:id>/notes` | POST | `invoices.note_create` |
- | `/invoices/<int:id>/notes/<int:note_id>/delete` | POST | `invoices.note_delete` |
- | `/invoices/<int:id>/notes/attachments/<int:media_id>` | GET | `invoices.note_attachment` |
-@@ -85,8 +86,8 @@
- | `/media/download/<int:media_id>` | GET | `media.download` |
- | `/media/m/<serial>` | GET | `media.mobile_scan` |
- | `/media/qr-sheet` | GET | `media.qr_sheet` |
--| `/media/qr/<serial>.png` | GET | `media.qr_png` |
--| `/media/qr/<serial>.svg` | GET | `media.qr_svg` |
-+| `/media/qr/<serial>.png` | GET | `media.qr_png` (login required; `mode`, `scan`, `target=invoice|note`) |
-+| `/media/qr/<serial>.svg` | GET | `media.qr_svg` (login required; `mode`, `scan`, `target=invoice|note`) |
- | `/media/scan` | GET | `media.scan_page` |
- | `/media/scan-upload/<int:invoice_id>` | POST | `media.scan_upload` |
- | `/media/thumb/<int:media_id>` | GET | `media.thumb` |
-@@ -147,3 +148,16 @@
- - `POST /invoices/<serial>/links` JSON or form: `linked_serial`, `linked_batch_id`, `link_type`, `amount_action`, `exclude_from_totals` (bool), `link_note`. Returns 201 with `link_id`.
- - `DELETE /invoices/<serial>/links/<link_id>`
++Change (admin only, data-entry users unchanged):
++- Invoice list search (serial, book, date) covers every batch. Each result shows a Batch column with the batch name and ID, and a banner says how many batches matched. Browsing without a query still shows the current batch.
++- Book number search matches the same number in every batch. The book summary is shown only when one book matches.
++- `/invoices/search` (AJAX) covers every batch for admins and returns `batch_id` and `batch_name` per result.
++- Mobile API `GET /api/v1/invoices?q=` and `?date=` covers every batch for admins, ignoring the batch selection. Results carry `batch_id` and `batch_name`.
++- Link lookup is intentionally unchanged: links stay inside one batch.
++
++Test: `qa/admin_all_batch_search_test.py` (18 checks, SQLite harness). Browser check on the demo: the admin search for `01` shows Batch 1 #1 and Batch 2 #2 in one list (screenshot `docs/screenshots/15-admin-all-batch-search.png`).
++
++Regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
++
++Date and book summary cards under all-batch search add totals across all batches and say so in their subtitle. The "Full Details" link is hidden for a book that belongs to another batch, because the book page only opens the current batch.
+diff -ruN old_srv/invoiceflow-server/server/app/routes/api.py new_srv/invoiceflow-server/server/app/routes/api.py
+--- old_srv/invoiceflow-server/server/app/routes/api.py	2026-10-17 15:52:54.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/routes/api.py	2026-10-17 18:03:49.540928384 +0000
+@@ -254,6 +254,9 @@
+         limit = 50
  
-+## Note attachments from the phone (QR `target`)
-+
-+The invoice QR payload (`mode=app`) has a `target` field:
-+- `invoice` (default): scan opens the invoice for document uploads, as before.
-+- `note`: scan focuses the invoice, opens its Notes sheet and asks for files. The files are saved as a new note with attachments.
-+
-+The web page shows this QR in the **Note QR** button on the Notes & comments card. Mobile API for the save: `POST /api/v1/invoices/<serial>/notes?batch_id=` (multipart `file` or `files`, optional `body`, requires `notes.create`).
-+
-+## Live link lookup and background forms
-+
-+- `GET /invoices/link-lookup?batch_id=&serial=&current=` returns `{found, invoice:{serial_number,date,book,page,total_amount,amounts,batch_name,...}}` or `{found:false, message}`. Only invoices the user may access are returned.
-+- The link form and the note form submit in the background (`data-history-form`): typed text is kept, the form clears on success, and the Linked invoices / Notes lists refresh in place (`data-live-region data-live-allow-forms`).
-+
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/TEST-REPORT-invoice-history.md /home/user/work/invoiceflow-server/server/TEST-REPORT-invoice-history.md
---- base/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 16:01:01.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:08:28.828712421 +0000
-@@ -52,3 +52,23 @@
- Screenshots: `docs/screenshots/` (12 PNG, captured with headless Chromium from `qa/screenshots/demo_server.py` + `take_shots.mjs`). Demo accounts are synthetic.
+     q = _scoped_query()
++    if (q_text or date_str) and g.api_user.is_admin():
++        # Admin search covers every batch; each result carries batch_id and batch_name.
++        q = q.execution_options(all_batches=True)
+     if q_text:
+         q = q.filter(Invoice.serial_number.ilike(f'%{q_text}%'))
+     if date_str:
+diff -ruN old_srv/invoiceflow-server/server/app/routes/invoices.py new_srv/invoiceflow-server/server/app/routes/invoices.py
+--- old_srv/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 16:57:44.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 18:03:49.540928384 +0000
+@@ -440,8 +440,11 @@
+     query = request.args.get('query', '')
+     user_id = request.args.get('user_id', type=int) if current_user.is_admin() else None
  
- Android (not compiled; no JDK/SDK in the sandbox): new `PermissionsModelTest.kt` (pure JVM), gating in `MainViewModel`, `ScanScreen`, `InvoiceHistoryScreen`, `Me.capabilities` parsing in `ApiService.ping`. Static brace-balance check: all files balanced. Removed unused `toggleManualCropEnabled`, `toggleAutoOpenHandles`, `CropSelection.toRect` and the template `ExampleUnitTest` / `ExampleRobolectricTest`.
-+
-+## Round 4: note-attachment QR, link lookup, background sync
-+
-+Server, SQLite harness:
-+- `qa/note_qr_and_lookup_test.py`: **32 / 32 pass**. Covers QR `target` payload (default invoice, unknown falls back), QR auth and owner access, link lookup (found, hidden, self, missing, empty, bad batch, login), AJAX note with text / file / blocked file type / empty, mobile API attachment-only note, `notes.create` off → 403, rendered page markers.
-+- `qa/mobile_qr_contract_test.py`: updated for the new `target` key (3/3).
-+- Re-run: `permissions_test.py` 67/67, `exclusion_and_mobile_api_test.py` 47/47, `invoice_history_test.py` 79/79.
-+
-+Browser (Chromium headless against `qa/screenshots/demo_server.py`), `qa/screenshots/verify_ui.mjs`: **14 / 14 pass**. Covers link preview, no-match message, submit disabled when not found, link without page reload, history list updates in the background, typed note text survives a background refresh, note saved in the background and list updated, Note QR modal image, no uncaught page errors.
-+
-+Bugs found and fixed in this round:
-+- Linked-invoices list did not update after linking (realtime.js skipped regions containing forms). The lists are now opt-in regions (`data-live-allow-forms`); typed or focused fields are still protected.
-+- Invoice QR endpoints were public. Now login and invoice access required.
-+- Note file picker used a narrow browser accept list. Now the server's allow-list decides.
-+- Link serial had no check until submit. Now live lookup.
-+
-+Screenshots: `docs/screenshots/` (14 PNG; 13 = link preview, 14 = Note QR modal). Demo accounts are synthetic.
-+
-+Not run here: Gradle build and Android unit tests (no JDK/SDK in the sandbox). Android Kotlin syntax was checked with tree-sitter-kotlin (24 files, 0 parse errors); type checking still needs Android Studio. Also not run: MySQL-backed and live-server suites (see Round 3).
-+
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/routes/invoices.py /home/user/work/invoiceflow-server/server/app/routes/invoices.py
---- base/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 15:52:55.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 16:57:44.249456690 +0000
-@@ -20,6 +20,7 @@
-     add_note, delete_note, create_link, delete_link, build_history, parse_bool,
-     count_links, count_notes, can_access_invoice, note_attachment_path,
-     get_invoice_any_batch,
-+    get_accessible_invoice_by_serial,
- )
- from app.utils.decorators import data_entry_required, owner_or_admin_required, capability_required
- from app.permissions import user_can
-@@ -1417,6 +1418,46 @@
-     return _history_reply(id, True, 'Invoice linked.')
++    # Administrators searching for something see every batch, labelled per row, so they
++    # do not have to switch batches first. Browsing without a query stays in the current batch.
++    search_all = bool(query) and current_user.is_admin()
+     if current_user.is_admin():
+-        base_query = Invoice.query
++        base_query = Invoice.query.execution_options(all_batches=True) if search_all else Invoice.query
+         if user_id:
+             base_query = base_query.filter(Invoice.created_by == user_id)
+     else:
+@@ -457,9 +460,12 @@
+         elif search_type == 'book':
+             try:
+                 book_number = int(str(query).strip().lstrip('#'))
+-                matched_book = Book.query.filter_by(book_number=book_number).first()
+-                if matched_book:
+-                    base_query = base_query.filter(Invoice.book_id == matched_book.id)
++                book_q = Book.query.execution_options(all_batches=True) if search_all else Book.query
++                books = book_q.filter_by(book_number=book_number).order_by(Book.batch_id).all()
++                if books:
++                    base_query = base_query.filter(Invoice.book_id.in_([b.id for b in books]))
++                    # The book summary needs one book; the same number in several batches is not summarised.
++                    matched_book = books[0] if len(books) == 1 else None
+                 else:
+                     base_query = base_query.filter(Invoice.id == -1)
+             except (ValueError, TypeError):
+@@ -528,6 +534,7 @@
+     invoice_query = base_query.order_by(Invoice.date.desc(), Invoice.serial_number.desc())
+     pagination = invoice_query.paginate(page=page, per_page=per_page, error_out=False)
+     invoices = pagination.items
++    search_batch_count = base_query.with_entities(Invoice.batch_id).distinct().count() if search_all else 0
  
- 
-+@bp.route('/link-lookup')
-+@data_entry_required
-+def link_lookup():
-+    """Live preview for the link form: what invoice does this batch + serial point to?
-+
-+    Query: batch_id, serial, current (id of the invoice being viewed). Only invoices the
-+    current user may access are returned, so the preview never leaks hidden data.
-+    """
-+    serial = (request.args.get('serial') or '').strip().lstrip('#').strip()
-+    if not serial:
-+        return jsonify(found=False, message='')
-+    try:
-+        batch_id = int(request.args.get('batch_id') or 0) or None
-+    except ValueError:
-+        return jsonify(found=False, message='Choose a valid batch.'), 400
-+    if batch_id is None:
-+        batch_id = current_batch_id()
-+
-+    inv = get_accessible_invoice_by_serial(batch_id, serial, current_user)
-+    if not inv:
-+        return jsonify(found=False,
-+                       message=f'No invoice {serial} in that batch is available to you.')
-+    if str(inv.id) == (request.args.get('current') or ''):
-+        return jsonify(found=False, message='That is this invoice. Choose a different one.')
-+
-+    book, page = get_invoice_book_page(inv)
-+    return jsonify(found=True, invoice={
-+        'id': inv.id,
-+        'batch_id': inv.batch_id,
-+        'batch_name': inv.batch.name if inv.batch else '',
-+        'serial_number': inv.serial_number,
-+        'date': inv.date.isoformat() if inv.date else '',
-+        'book': book,
-+        'page': page,
-+        'total_amount': float(inv.total_amount or 0),
-+        'amounts': inv.get_amounts(),
-+        'created_by': inv.creator.username if inv.creator else None,
-+    })
-+
-+
- @bp.route('/<int:id>/links/<int:link_id>/delete', methods=['POST'])
- @data_entry_required
- @owner_or_admin_required(Invoice, 'id')
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/routes/media.py /home/user/work/invoiceflow-server/server/app/routes/media.py
---- base/invoiceflow-server/server/app/routes/media.py	2026-10-17 15:52:55.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/routes/media.py	2026-10-17 16:58:26.433669762 +0000
-@@ -17,6 +17,7 @@
- from app.services.invoice_service import get_invoice_by_id
- from app.services.audit_service import log_action
- from app.utils.decorators import data_entry_required, admin_required, owner_or_admin_required, capability_required
-+from app.services.invoice_history_service import can_access_invoice
- from app.utils.helpers import get_client_ip, allowed_file, generate_unique_filename, format_file_size, get_invoice_book_page
- 
- bp = Blueprint('media', __name__, url_prefix='/media')
-@@ -89,7 +90,7 @@
- # QR payload builder
- # ============================================================
- 
--def _build_invoice_qr_payload(invoice, mode='web', scan='auto'):
-+def _build_invoice_qr_payload(invoice, mode='web', scan='auto', target='invoice'):
-     """
-     Build the string encoded into the invoice QR.
- 
-@@ -102,9 +103,16 @@
-                 Used on printed sheets where you scan one after another.
-       'focus' — app locks onto this invoice (FOCUS mode).
-                 Used when printing a QR for one specific invoice.
-+
-+    target (only meaningful when mode='app'):
-+      'invoice' — scanning opens the invoice for document uploads (default).
-+      'note'    — scanning opens the invoice's Notes sheet and starts a note
-+                  attachment, so the photo/file becomes a note attachment.
-     """
-     if scan not in ('auto', 'focus'):
-         scan = 'auto'
-+    if target not in ('invoice', 'note'):
-+        target = 'invoice'
- 
-     if mode == 'app':
-         payload = {
-@@ -115,6 +123,7 @@
-             'serial': invoice.serial_number,
-             'base_url': request.url_root.rstrip('/'),
-             'scan': scan,
-+            'target': target,
-         }
-         return json.dumps(payload, separators=(',', ':'))
- 
-@@ -127,14 +136,19 @@
- # ============================================================
- 
- @bp.route('/qr/<serial>.svg')
-+@login_required
-+@data_entry_required
- def qr_svg(serial):
-     invoice = _lookup_invoice_by_serial(serial)
-     if not invoice:
-         abort(404)
-+    if not can_access_invoice(invoice, current_user):
-+        abort(404)
- 
-     mode = (request.args.get('mode') or 'web').lower()
-     scan = (request.args.get('scan') or 'auto').lower()
--    payload = _build_invoice_qr_payload(invoice, mode, scan)
-+    target = (request.args.get('target') or 'invoice').lower()
-+    payload = _build_invoice_qr_payload(invoice, mode, scan, target)
- 
-     try:
-         import qrcode
-@@ -149,7 +163,7 @@
-         img.save(buf)
-         buf.seek(0)
-         resp = send_file(buf, mimetype='image/svg+xml',
--                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}.svg')
-+                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}_{target}.svg')
-         resp.headers['Cache-Control'] = 'private, no-store'
-         return resp
-     except ImportError:
-@@ -157,14 +171,19 @@
- 
- 
- @bp.route('/qr/<serial>.png')
-+@login_required
-+@data_entry_required
- def qr_png(serial):
-     invoice = _lookup_invoice_by_serial(serial)
-     if not invoice:
-         abort(404)
-+    if not can_access_invoice(invoice, current_user):
-+        abort(404)
- 
-     mode = (request.args.get('mode') or 'web').lower()
-     scan = (request.args.get('scan') or 'auto').lower()
--    payload = _build_invoice_qr_payload(invoice, mode, scan)
-+    target = (request.args.get('target') or 'invoice').lower()
-+    payload = _build_invoice_qr_payload(invoice, mode, scan, target)
- 
-     try:
-         import qrcode
-@@ -177,7 +196,7 @@
-         img.save(buf, format='PNG')
-         buf.seek(0)
-         resp = send_file(buf, mimetype='image/png',
--                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}.png')
-+                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}_{target}.png')
-         resp.headers['Cache-Control'] = 'private, no-store'
-         return resp
-     except ImportError:
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/static/js/realtime.js /home/user/work/invoiceflow-server/server/app/static/js/realtime.js
---- base/invoiceflow-server/server/app/static/js/realtime.js	2026-10-10 08:56:56.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/static/js/realtime.js	2026-10-17 17:03:44.971278672 +0000
-@@ -141,7 +141,10 @@
-                 old.querySelectorAll('[data-live-region][id]').forEach(region => {
-                     const replacement=next.querySelector('#'+CSS.escape(region.id));
-                     if(replacement?.dataset.batchWritable)region.dataset.batchWritable=replacement.dataset.batchWritable;
--                    if(replacement && !region.querySelector('form,input,textarea,select') && region.innerHTML!==replacement.innerHTML)
-+                    // Regions with forms are updated only when explicitly opted in (data-live-allow-forms).
-+                    // retain() still keeps any form, input or select the user has typed in or focused.
-+                    const mayHoldForms = region.hasAttribute('data-live-allow-forms');
-+                    if(replacement && (mayHoldForms || !region.querySelector('form,input,textarea,select')) && region.innerHTML!==replacement.innerHTML)
-                         Idiomorph.morph(region,replacement.innerHTML,{morphStyle:'innerHTML',callbacks});
-                 });
-             } else if (old.innerHTML !== next.innerHTML) {
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/templates/invoices/view.html /home/user/work/invoiceflow-server/server/app/templates/invoices/view.html
---- base/invoiceflow-server/server/app/templates/invoices/view.html	2026-10-17 15:48:47.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/templates/invoices/view.html	2026-10-17 17:04:03.671373103 +0000
-@@ -328,6 +328,7 @@
-                         <div class="col-lg-5">
-                             <h6 class="text-muted text-uppercase small fw-bold mb-3">Linked invoices</h6>
- 
-+                            <div id="live-links" data-live-region data-live-allow-forms>
-                             {% for rel in history.relations %}
-                             <div class="border rounded p-2 mb-2">
-                                 <div class="d-flex justify-content-between align-items-start gap-2">
-@@ -372,22 +373,25 @@
-                             {% else %}
-                             <p class="text-muted small mb-2">No linked invoices.</p>
-                             {% endfor %}
-+</div>
- 
-                             {% if history.hidden_link_count %}
-                             <p class="text-muted small mb-2"><i class="fas fa-lock me-1"></i>{{ history.hidden_link_count }} linked invoice(s) not visible to you.</p>
-                             {% endif %}
- 
-                                                         {% if can('links.create') %}
--                            <form method="POST" action="{{ url_for('invoices.link_create', id=invoice.id, batch_id=invoice.batch_id) }}" class="border-top pt-3 mt-3">
-+                            <form method="POST" action="{{ url_for('invoices.link_create', id=invoice.id, batch_id=invoice.batch_id) }}"
-+                                  class="border-top pt-3 mt-3" data-history-form id="link-form">
-                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                 <h6 class="small fw-bold mb-2">Link another invoice</h6>
--                                <select name="linked_batch_id" class="form-select form-select-sm mb-2">
-+                                <select name="linked_batch_id" id="link-batch" class="form-select form-select-sm mb-2">
-                                     {% for b in batches %}
-                                     <option value="{{ b.id }}" {% if b.id == invoice.batch_id %}selected{% endif %}>{{ b.name }}{% if b.id == invoice.batch_id %} (this invoice's batch){% endif %}</option>
-                                     {% endfor %}
-                                 </select>
--                                <input type="text" name="linked_serial" class="form-control form-control-sm mb-2"
--                                       inputmode="numeric" placeholder="Serial of the other invoice, e.g. 0042" required>
-+                                <input type="text" name="linked_serial" id="link-serial" class="form-control form-control-sm mb-2"
-+                                       inputmode="numeric" autocomplete="off" placeholder="Serial of the other invoice, e.g. 0042" required>
-+                                <div id="link-preview" class="small mb-2" aria-live="polite"></div>
-                                 <select name="link_type" class="form-select form-select-sm mb-2">
-                                     <option value="related">Related (relation only)</option>
-                                     <option value="duplicate">Duplicate of that invoice</option>
-@@ -403,30 +407,37 @@
-                                 </select>
-                                 <input type="text" name="link_note" class="form-control form-control-sm mb-2" maxlength="2000"
-                                        placeholder="Reason (optional)">
--                                <button type="submit" class="btn btn-sm btn-outline-primary w-100">
-+                                <button type="submit" id="link-submit" class="btn btn-sm btn-outline-primary w-100" disabled>
-                                     <i class="fas fa-link me-1"></i>Link invoice
-                                 </button>
-+                                <div class="text-danger small mt-2 history-form-error" hidden></div>
-                             </form>
-                             {% endif %}
-                         </div>
- 
-                         <div class="col-lg-7">
--                            <h6 class="text-muted text-uppercase small fw-bold mb-3">Notes &amp; comments</h6>
-+                            <div class="d-flex justify-content-between align-items-center mb-3">
-+                                <h6 class="text-muted text-uppercase small fw-bold mb-0">Notes &amp; comments</h6>
-+                                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#noteQrModal">
-+                                    <i class="fas fa-qrcode me-1"></i>Note QR
-+                                </button>
-+                            </div>
- 
-                                                         {% if can('notes.create') %}
--                            <form method="POST" enctype="multipart/form-data"
-+                            <form method="POST" enctype="multipart/form-data" data-history-form id="note-form"
-                                   action="{{ url_for('invoices.note_create', id=invoice.id, batch_id=invoice.batch_id) }}" class="mb-3">
-                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                 <textarea name="body" class="form-control form-control-sm mb-2" rows="2" maxlength="2000"
-                                           placeholder="Write a note (optional if you attach a file)"></textarea>
--                                <input type="file" name="files" class="form-control form-control-sm mb-2" multiple
--                                       accept=".pdf,.png,.jpg,.jpeg,.gif,.doc,.docx">
-+                                <input type="file" name="files" id="note-files" class="form-control form-control-sm mb-2" multiple>
-+                                <div class="text-danger small mb-2 history-form-error" hidden></div>
-                                 <button type="submit" class="btn btn-sm btn-primary">
-                                     <i class="fas fa-comment-medical me-1"></i>Add note
-                                 </button>
-                             </form>
-                             {% endif %}
- 
-+                            <div id="live-notes" data-live-region data-live-allow-forms>
-                             {% for note in history.notes %}
-                             <div class="border rounded p-2 mb-2">
-                                 <div class="d-flex justify-content-between align-items-center small text-muted mb-1">
-@@ -469,6 +480,7 @@
-                             {% else %}
-                             <p class="text-muted small">No notes yet. Notes from linked invoices also appear here.</p>
-                             {% endfor %}
-+                            </div>
-                         </div>
-                     </div>
-                 </div>
-@@ -525,6 +537,31 @@
- {% endblock %}
- 
- {% block scripts %}
-+<div class="modal fade" id="noteQrModal" tabindex="-1" aria-labelledby="noteQrTitle" aria-hidden="true">
-+    <div class="modal-dialog modal-dialog-centered modal-sm">
-+        <div class="modal-content">
-+            <div class="modal-header">
-+                <h5 class="modal-title" id="noteQrTitle">Note attachment QR</h5>
-+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-+            </div>
-+            <div class="modal-body text-center">
-+                <img src="{{ url_for('media.qr_svg', serial=invoice.serial_number, batch_id=invoice.batch_id, mode='app', scan='focus', target='note') }}"
-+                     alt="Scan to attach a file to a note on invoice {{ invoice.serial_number }}" width="240" height="240" class="img-fluid">
-+                <p class="small text-muted mt-3 mb-0">
-+                    Scan this with the InvoiceFlow app on invoice #{{ invoice.serial_number }}.
-+                    The photo or file becomes an attachment on a new note.
-+                </p>
-+            </div>
-+            <div class="modal-footer justify-content-between">
-+                <a class="btn btn-sm btn-outline-secondary"
-+                   href="{{ url_for('media.qr_svg', serial=invoice.serial_number, batch_id=invoice.batch_id, mode='app', scan='focus', target='note') }}" download>
-+                    <i class="fas fa-download me-1"></i>Download
-+                </a>
-+                <button type="button" class="btn btn-sm btn-primary" data-bs-dismiss="modal">Done</button>
-+            </div>
-+        </div>
-+    </div>
-+</div>
- <script>
-     let deleteModal = null, deleteForm = null;
-     let deleteMediaModal = null, deleteMediaForm = null;
-@@ -559,6 +596,127 @@
-         const btn = this.querySelector('button[type="submit"]');
-         if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Deleting...'; }
-     });
-+
-+    // ------------------------------------------------------------------
-+    // Link lookup + background-safe forms
-+    // Lookup shows the other invoice before you link it. Forms marked
-+    // data-history-form submit in the background, so the typed data is
-+    // never wiped by a refresh; the history list updates via InvoiceLive.
-+    // ------------------------------------------------------------------
-+    const LINK_LOOKUP_URL = "{{ url_for('invoices.link_lookup') }}";
-+    const CURRENT_INVOICE_ID = "{{ invoice.id }}";
-+    let linkLookupTimer = null, linkLookupSeq = 0, linkFound = false;
-+
-+    function escHtml(value) {
-+        return String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
-+    }
-+    function fmtAmount(value) {
-+        const n = typeof value === 'object' && value !== null ? Number(value.value ?? value.amount ?? 0) : Number(value);
-+        return Number.isFinite(n) ? n.toFixed(3) : '0.000';
-+    }
-+
-+    function renderLinkPreview(data) {
-+        const preview = document.getElementById('link-preview');
-+        const submit = document.getElementById('link-submit');
-+        if (!preview || !submit) return;
-+        linkFound = !!data.found;
-+        submit.disabled = !linkFound;
-+        if (!linkFound) {
-+            preview.innerHTML = data.message ? `<span class="text-muted">${escHtml(data.message)}</span>` : '';
-+            return;
-+        }
-+        const inv = data.invoice;
-+        const amounts = (inv.amounts || []).map(a => fmtAmount(a)).join(', ') || '—';
-+        const bookPage = inv.book ? `Book ${escHtml(inv.book)}${inv.page ? ', page ' + escHtml(inv.page) : ''}` : 'No book';
-+        preview.innerHTML = `
-+            <div class="border rounded p-2 bg-light">
-+                <div class="fw-semibold">#${escHtml(inv.serial_number)} · ${escHtml(inv.date)}</div>
-+                <div class="text-muted">${bookPage} · ${escHtml(inv.batch_name)}</div>
-+                <div>Total ${fmtAmount(inv.total_amount)} <span class="text-muted">(amounts: ${escHtml(amounts)})</span></div>
-+                ${inv.created_by ? `<div class="text-muted">Entered by ${escHtml(inv.created_by)}</div>` : ''}
-+            </div>`;
-+    }
-+
-+    function runLinkLookup() {
-+        const serialInput = document.getElementById('link-serial');
-+        const batchSelect = document.getElementById('link-batch');
-+        const preview = document.getElementById('link-preview');
-+        const submit = document.getElementById('link-submit');
-+        if (!serialInput || !batchSelect || !preview || !submit) return;
-+        const serial = serialInput.value.trim();
-+        if (!serial) {
-+            linkFound = false;
-+            preview.innerHTML = '';
-+            submit.disabled = true;
-+            return;
-+        }
-+        const seq = ++linkLookupSeq;
-+        const qs = new URLSearchParams({serial, batch_id: batchSelect.value, current: CURRENT_INVOICE_ID});
-+        fetch(LINK_LOOKUP_URL + '?' + qs.toString(), {
-+            credentials: 'same-origin',
-+            headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
-+        }).then(r => r.json()).then(data => {
-+            if (seq === linkLookupSeq) renderLinkPreview(data);
-+        }).catch(() => {
-+            if (seq !== linkLookupSeq) return;
-+            linkFound = false;
-+            submit.disabled = true;
-+            preview.innerHTML = '<span class="text-danger">Could not check this serial. Try again.</span>';
-+        });
-+    }
-+
-+    document.addEventListener('input', event => {
-+        if (event.target && event.target.id === 'link-serial') {
-+            clearTimeout(linkLookupTimer);
-+            linkLookupTimer = setTimeout(runLinkLookup, 250);
-+        }
-+    });
-+    document.addEventListener('change', event => {
-+        if (event.target && event.target.id === 'link-batch') runLinkLookup();
-+    });
-+    // Live sync: if the other invoice changed (added, edited, deleted), re-check the preview.
-+    document.addEventListener('invoiceflow:updated', () => {
-+        const serialInput = document.getElementById('link-serial');
-+        if (serialInput && serialInput.value.trim()) runLinkLookup();
-+    });
-+
-+    document.addEventListener('submit', async event => {
-+        const form = event.target.closest ? event.target.closest('form[data-history-form]') : null;
-+        if (!form) return;
-+        event.preventDefault();
-+        if (form.dataset.submitting) return;
-+        form.dataset.submitting = '1';
-+        const btn = form.querySelector('[type=submit]');
-+        const errBox = form.querySelector('.history-form-error');
-+        const originalHtml = btn ? btn.innerHTML : '';
-+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Saving…'; }
-+        if (errBox) { errBox.hidden = true; errBox.textContent = ''; }
-+        try {
-+            const res = await fetch(form.action, {
-+                method: 'POST',
-+                body: new FormData(form),
-+                credentials: 'same-origin',
-+                headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
-+            });
-+            if (res.redirected) throw new Error('Your session or permissions changed. Sign in and try again.');
-+            const data = await res.json().catch(() => ({}));
-+            if (!res.ok || !data.success) throw new Error(data.error || 'Could not save. Try again.');
-+            form.reset();
-+            form.querySelectorAll('[data-live-dirty]').forEach(el => delete el.dataset.liveDirty);
-+            showToast(data.message || 'Saved.', 'success');
-+            if (form.id === 'link-form') runLinkLookup();
-+            if (window.InvoiceLive) await window.InvoiceLive.refresh();
-+        } catch (error) {
-+            if (errBox) { errBox.hidden = false; errBox.textContent = error.message; }
-+            else showToast(error.message, 'danger');
-+        } finally {
-+            delete form.dataset.submitting;
-+            if (btn) {
-+                btn.innerHTML = originalHtml;
-+                btn.disabled = form.id === 'link-form' ? !linkFound : false;
-+            }
-+        }
-+    });
- </script>
- {% endblock %}
- 
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/mobile_qr_contract_test.py /home/user/work/invoiceflow-server/server/qa/mobile_qr_contract_test.py
---- base/invoiceflow-server/server/qa/mobile_qr_contract_test.py	2026-10-10 09:06:09.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/qa/mobile_qr_contract_test.py	2026-10-17 17:00:15.162218923 +0000
-@@ -33,6 +33,7 @@
-             "serial": "0001",
-             "base_url": "https://invoice.example",
-             "scan": "focus",
-+            "target": "invoice",
-         },
+     invoice_ids = [inv.id for inv in invoices]
+     media_by_invoice = {}
+@@ -564,6 +571,8 @@
+         users=users,
+         date_summary=date_summary,
+         book_summary=book_summary,
++        search_all=search_all,
++        search_batch_count=search_batch_count,
      )
  
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/note_qr_and_lookup_test.py /home/user/work/invoiceflow-server/server/qa/note_qr_and_lookup_test.py
---- base/invoiceflow-server/server/qa/note_qr_and_lookup_test.py	1970-01-01 00:00:00.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/qa/note_qr_and_lookup_test.py	2026-10-17 16:59:57.738130927 +0000
-@@ -0,0 +1,170 @@
-+"""Tests for: note-attachment QR, live link lookup, background note/link forms, mobile note upload.
+ 
+@@ -960,12 +969,15 @@
+             results = search_invoices(
+                 query, search_type,
+                 current_user.id if not current_user.is_admin() else None,
++                all_batches=current_user.is_admin(),
+             )
+             data = []
+             for inv in results[:20]:
+                 book, page = get_invoice_book_page(inv)
+                 data.append({
+                     'id': inv.id,
++                    'batch_id': inv.batch_id,
++                    'batch_name': inv.batch.name if inv.batch else '',
+                     'date': inv.date.isoformat(),
+                     'serial_number': inv.serial_number,
+                     'book': book,
+diff -ruN old_srv/invoiceflow-server/server/app/services/invoice_service.py new_srv/invoiceflow-server/server/app/services/invoice_service.py
+--- old_srv/invoiceflow-server/server/app/services/invoice_service.py	2026-10-17 15:53:46.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/services/invoice_service.py	2026-10-17 18:03:49.544928404 +0000
+@@ -427,14 +427,17 @@
+     return Invoice.query.get(invoice_id)
+ 
+ 
+-def search_invoices(query, search_type='serial', user_id=None):
++def search_invoices(query, search_type='serial', user_id=None, all_batches=False):
++    """Serial or date search. all_batches=True (administrators) searches every batch;
++    callers must label results with their batch."""
++    base = Invoice.query.execution_options(all_batches=True) if all_batches else Invoice.query
+     if search_type == 'serial':
+-        q = Invoice.query.filter(Invoice.serial_number.like(f'%{query}%'))
++        q = base.filter(Invoice.serial_number.like(f'%{query}%'))
+     else:
+         search_date = parse_date_string(query, '%Y-%m-%d')
+         if not search_date:
+             return []
+-        q = Invoice.query.filter(Invoice.date == search_date)
++        q = base.filter(Invoice.date == search_date)
+ 
+     if user_id is not None:
+         q = q.filter(Invoice.created_by == user_id)
+diff -ruN old_srv/invoiceflow-server/server/app/static/js/main.js new_srv/invoiceflow-server/server/app/static/js/main.js
+--- old_srv/invoiceflow-server/server/app/static/js/main.js	2026-10-10 08:56:56.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/static/js/main.js	2026-10-17 18:03:49.544928404 +0000
+@@ -527,7 +527,11 @@
+                 data.results.forEach(inv => {
+                     const item = document.createElement('div');
+                     item.className = 'search-result-item';
++                    const label = document.createElement('span');
++                    label.className = 'batch';
++                    label.textContent = inv.batch_name ? `${inv.batch_name} #${inv.batch_id}` : '';
+                     item.innerHTML = `<span class="serial">${inv.serial_number}</span><span class="date">${formatDate(inv.date, 'MM/DD/YYYY')}</span><span class="amount">${formatCurrency(inv.total_amount)}</span>`;
++                    item.appendChild(label);
+                     item.addEventListener('click', () => window.location.href = `/invoices/${inv.id}`);
+                     this.results.appendChild(item);
+                 });
+diff -ruN old_srv/invoiceflow-server/server/app/templates/invoices/list.html new_srv/invoiceflow-server/server/app/templates/invoices/list.html
+--- old_srv/invoiceflow-server/server/app/templates/invoices/list.html	2026-10-17 15:48:54.000000000 +0000
++++ new_srv/invoiceflow-server/server/app/templates/invoices/list.html	2026-10-17 18:03:49.540928384 +0000
+@@ -153,6 +153,7 @@
+                     <small class="text-muted">
+                         Current date format: <strong>{{ system_date_format }}</strong>
+                         &nbsp;·&nbsp; For book search, enter just the book number (e.g. <code>3</code>)
++                        {% if current_user.is_admin() %}<br>As administrator, a search covers <strong>all batches</strong>; each result shows its batch.{% endif %}
+                     </small>
+                 </div>
+                 <div class="col-md-3 d-flex align-items-end">
+@@ -187,7 +188,9 @@
+                 <div>
+                     <h6>Summary for {{ date_summary.date | localdate }}</h6>
+                     <small>
+-                        {% if current_user.is_admin() and not user_id %}
++                        {% if search_all %}
++                            All batches: every invoice for this date, across all batches
++                        {% elif current_user.is_admin() and not user_id %}
+                             All invoices for this date
+                         {% elif user_id %}
+                             Invoices created by the selected user for this date
+@@ -246,13 +249,17 @@
+                 <div>
+                     <h6>
+                         Book #{{ book_summary.book.book_number }}
++                        {% if not search_all or book_summary.book.batch_id == g.batch_id %}
+                         <a href="{{ url_for('admin.book_detail', book_number=book_summary.book.book_number) }}"
+                            class="btn btn-sm btn-outline-primary ms-2">
+                             <i class="fas fa-external-link-alt me-1"></i>Full Details
+                         </a>
++                        {% endif %}
+                     </h6>
+                     <small>
+-                        {% if current_user.is_admin() and not user_id %}
++                        {% if search_all %}
++                            All batches: every invoice in this book number, across all batches
++                        {% elif current_user.is_admin() and not user_id %}
+                             All invoices in this book
+                         {% elif user_id %}
+                             Invoices created by the selected user in this book
+@@ -310,6 +317,13 @@
+     </div>
+     {% endif %}
+ 
++    {% if search_all %}
++    <div class="alert alert-info d-flex align-items-center gap-2 mb-3" id="search-all-batches">
++        <i class="fas fa-layer-group"></i>
++        <span>Searching <strong>all batches</strong>{% if search_batch_count %} · {{ search_batch_count }} batch{{ 'es' if search_batch_count != 1 }} matched{% endif %}. The <strong>Batch</strong> column shows where each invoice belongs.</span>
++    </div>
++    {% endif %}
++
+     <!-- Invoices Table -->
+     <div class="card border-0 shadow-sm">
+         <div class="card-body p-0">
+@@ -318,6 +332,7 @@
+                     <thead>
+                         <tr>
+                             <th>ID</th>
++                            {% if search_all %}<th>Batch</th>{% endif %}
+                             <th>Date</th>
+                             <th>Serial #</th>
+                             <th>Book</th>
+@@ -337,6 +352,7 @@
+                         {% for invoice in invoices %}
+                         <tr>
+                             <td><span class="text-muted small">#{{ invoice.id }}</span></td>
++                            {% if search_all %}<td><span class="badge bg-primary-subtle text-primary border" data-batch-label="{{ invoice.batch_id }}">{{ invoice.batch.name if invoice.batch else 'Batch' }} <span class="text-muted">#{{ invoice.batch_id }}</span></span></td>{% endif %}
+                             <td>{{ invoice.date | localdate }}</td>
+                             <td>
+                                 <a href="{{ url_for('invoices.view', id=invoice.id) }}"
+@@ -422,7 +438,7 @@
+                         {% endfor %}
+                         {% else %}
+                         <tr>
+-                            <td colspan="{% if current_user.is_admin() %}11{% else %}9{% endif %}"
++                            <td colspan="{{ (11 if current_user.is_admin() else 9) + (1 if search_all else 0) }}"
+                                 class="text-center text-muted py-4">
+                                 <i class="fas fa-inbox fa-2x d-block mb-2"></i>
+                                 <p class="mb-0">No invoices found.</p>
+diff -ruN old_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py new_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py
+--- old_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py	1970-01-01 00:00:00.000000000 +0000
++++ new_srv/invoiceflow-server/server/qa/admin_all_batch_search_test.py	2026-10-17 18:03:49.540928384 +0000
+@@ -0,0 +1,148 @@
++"""Admin search covers every batch and labels each result with its batch.
++
++Covers the web invoice list (serial, book, date), the AJAX search endpoint, the mobile API
++search, and the regression cases: data-entry users stay in their batch, admin browsing without a
++query stays in the current batch, and the link lookup stays inside one batch.
 +
 +Runs through the real Flask app on a temporary SQLite database (sqlite_harness.py).
-+Run: python qa/note_qr_and_lookup_test.py
++Run: python qa/admin_all_batch_search_test.py
 +"""
-+import io
-+import json
 +import os
 +import sys
 +from datetime import date
@@ -568,13 +244,9 @@ diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/note_qr_and_l
 +app.config['TESTING'] = True
 +
 +from app.extensions import db  # noqa: E402
-+from app.models import User, Invoice, UserCapability  # noqa: E402
-+from app.routes.media import _build_invoice_qr_payload  # noqa: E402
++from app.models import User, Batch, Book, Invoice  # noqa: E402
 +
 +PASSED = []
-+XHR = {'X-Requested-With': 'XMLHttpRequest'}
-+SARAH_KEY = 'sarah-key-123'
-+H = {'X-API-Key': SARAH_KEY}
 +
 +
 +def check(label, cond, extra=''):
@@ -584,25 +256,39 @@ diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/note_qr_and_l
 +    print('PASS', label)
 +
 +
-+def setup_data():
++def setup():
 +    with app.app_context():
-+        sarah = User(username='sarah', email='sarah@x.test', role='data_entry', api_key=SARAH_KEY)
++        admin = User(username='admin', email='admin@x.test', role='admin')
++        admin.set_password('Admin@12345')
++        admin.api_key = 'admin-key-789'
++        sarah = User(username='sarah', email='sarah@x.test', role='data_entry')
 +        sarah.set_password('Sarah@12345')
-+        omar = User(username='omar', email='omar@x.test', role='data_entry', api_key='omar-key-456')
-+        omar.set_password('Omar@12345')
-+        db.session.add_all([sarah, omar])
++        sarah.api_key = 'sarah-key-123'
++        db.session.add_all([admin, sarah])
++        db.session.flush()
++        b2 = Batch(id=2, name='Batch Two', numbering_mode='repeat', start_book=1,
++                   start_serial=101, archived=False)
++        db.session.add(b2)
++        db.session.flush()
++        book1 = Book(batch_id=1, book_number=1, capacity=50)
++        book2 = Book(batch_id=2, book_number=1, capacity=50)
++        db.session.add_all([book1, book2])
 +        db.session.flush()
 +
-+        def mk(serial, owner, amount):
-+            i = Invoice(batch_id=1, date=date(2026, 10, 15), serial_number=serial,
-+                        total_amount=Decimal(str(amount)), created_by=owner.id, updated_by=owner.id)
-+            i.set_amounts([float(amount)])
-+            db.session.add(i)
++        def mk(batch, book, serial, day, owner):
++            inv = Invoice(batch_id=batch.id, book_id=book.id, book_page=5,
++                          date=date(2026, 10, day), serial_number=serial,
++                          total_amount=Decimal('10.000'), created_by=owner.id, updated_by=owner.id)
++            inv.set_amounts([10.0])
++            db.session.add(inv)
 +            db.session.flush()
-+            return i.id
++            return inv.id
 +
-+        ids = {'mine': mk('0001', sarah, 10.0), 'mine2': mk('0002', sarah, 20.0),
-+               'other': mk('0003', omar, 5.0), 'sarah_id': sarah.id}
++        ids = {
++            'b1_0005': mk(db.session.get(Batch, 1), book1, '0005', 15, sarah),
++            'b2_0005': mk(b2, book2, '0005', 14, sarah),
++            'b2_0009': mk(b2, book2, '0009', 16, sarah),
++        }
 +        db.session.commit()
 +        return ids
 +
@@ -613,207 +299,75 @@ diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/note_qr_and_l
 +
 +
 +def main():
-+    ids = setup_data()
++    ids = setup()
++    admin_c = app.test_client()
++    login(admin_c, 'admin', 'Admin@12345')
 +    sarah_c = app.test_client()
 +    login(sarah_c, 'sarah', 'Sarah@12345')
-+    anon = app.test_client()
 +
-+    # ---------------- note-attachment QR ----------------
-+    with app.test_request_context('/'):
-+        inv = db.session.get(Invoice, ids['mine'])
-+        payload = json.loads(_build_invoice_qr_payload(inv, 'app', 'focus', 'note'))
-+        check('QR payload carries target=note', payload.get('target') == 'note', str(payload))
-+        check('QR payload keeps focus scan', payload.get('scan') == 'focus')
-+        plain = json.loads(_build_invoice_qr_payload(inv, 'app', 'focus'))
-+        check('default QR payload target is invoice', plain.get('target') == 'invoice')
-+        bogus = json.loads(_build_invoice_qr_payload(inv, 'app', 'focus', 'zzz'))
-+        check('unknown target falls back to invoice', bogus.get('target') == 'invoice')
++    # 1) Admin serial search from batch 1 finds the batch 2 invoice too, labelled.
++    r = admin_c.get('/invoices/?batch_id=1&search_type=serial&query=0005')
++    body = r.get_data(as_text=True)
++    check('admin serial search returns 200', r.status_code == 200)
++    check('admin serial search shows batch 1 match', f"/invoices/{ids['b1_0005']}" in body)
++    check('admin serial search shows batch 2 match without switching', f"/invoices/{ids['b2_0005']}" in body)
++    check('admin results carry a batch label', 'data-batch-label="2"' in body and 'Batch Two' in body)
++    check('admin sees the all-batches banner', 'id="search-all-batches"' in body)
 +
-+    r = sarah_c.get('/media/qr/0001.svg?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR svg for own invoice renders', r.status_code == 200, str(r.status_code))
-+    check('QR svg is not cached publicly', 'no-store' in (r.headers.get('Cache-Control') or ''))
-+    r = anon.get('/media/qr/0001.svg?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR svg needs login', r.status_code in (302, 401, 403), str(r.status_code))
-+    r = sarah_c.get('/media/qr/0003.svg?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR svg hidden for another user\'s invoice', r.status_code == 404, str(r.status_code))
-+    r = sarah_c.get('/media/qr/0001.png?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR png for own invoice renders', r.status_code == 200, str(r.status_code))
++    # 2) Batch-only match from the other batch.
++    body = admin_c.get('/invoices/?batch_id=1&search_type=serial&query=0009').get_data(as_text=True)
++    check('admin finds a batch 2 only serial from batch 1 view', f"/invoices/{ids['b2_0009']}" in body)
 +
-+    # ---------------- live link lookup ----------------
-+    base = f"/invoices/link-lookup?batch_id=1&current={ids['mine']}"
-+    r = sarah_c.get(base + '&serial=0002', headers=XHR)
-+    body = r.get_json()
-+    check('lookup finds a linkable invoice', r.status_code == 200 and body.get('found') is True, str(body))
-+    inv_json = body.get('invoice', {})
-+    check('lookup returns serial, date, total, amounts',
-+          inv_json.get('serial_number') == '0002' and inv_json.get('date') == '2026-10-15'
-+          and float(inv_json.get('total_amount')) == 20.0 and inv_json.get('amounts') == [20.0],
-+          str(inv_json))
-+    check('lookup returns batch name', bool(inv_json.get('batch_name')))
++    # 3) Book search covers all batches (book 1 exists in both).
++    body = admin_c.get('/invoices/?batch_id=1&search_type=book&query=1').get_data(as_text=True)
++    check('admin book search finds both batches',
++          f"/invoices/{ids['b1_0005']}" in body and f"/invoices/{ids['b2_0009']}" in body)
 +
-+    body = sarah_c.get(base + '&serial=0003', headers=XHR).get_json()
-+    check('lookup hides an invoice the user cannot access',
-+          body.get('found') is False and '0003' in body.get('message', ''), str(body))
-+    body = sarah_c.get(base + '&serial=0001', headers=XHR).get_json()
-+    check('lookup refuses the invoice itself', body.get('found') is False and 'this invoice' in body.get('message', '').lower(), str(body))
-+    body = sarah_c.get(base + '&serial=9999', headers=XHR).get_json()
-+    check('lookup reports a missing serial', body.get('found') is False, str(body))
-+    body = sarah_c.get(base + '&serial=', headers=XHR).get_json()
-+    check('empty serial gives an empty, not-found reply', body == {'found': False, 'message': ''}, str(body))
-+    r = sarah_c.get('/invoices/link-lookup?batch_id=abc&serial=0002', headers=XHR)
-+    check('bad batch id is rejected', r.status_code == 400, str(r.status_code))
-+    r = anon.get('/invoices/link-lookup?batch_id=1&serial=0002', headers=XHR)
-+    check('lookup needs login', r.status_code in (302, 401, 403), str(r.status_code))
++    # 4) Admin browsing without a query stays in the current batch.
++    body = admin_c.get('/invoices/?batch_id=1').get_data(as_text=True)
++    check('admin browse without query stays in batch 1',
++          f"/invoices/{ids['b1_0005']}" in body and f"/invoices/{ids['b2_0009']}" not in body)
++    check('admin browse without query has no all-batches banner', 'id="search-all-batches"' not in body)
 +
-+    # ---------------- background note save (web, AJAX) ----------------
-+    url = f"/invoices/{ids['mine']}/notes?batch_id=1"
-+    r = sarah_c.post(url, data={'body': 'Customer confirmed by phone'}, headers=XHR)
-+    check('AJAX note with text saves', r.status_code == 200 and r.get_json().get('success') is True,
-+          f'{r.status_code} {r.get_data(as_text=True)[:200]}')
-+    r = sarah_c.post(url, data={'body': '', 'files': (io.BytesIO(b'%PDF-1.4 test'), 'scan.pdf')},
-+                     content_type='multipart/form-data', headers=XHR)
-+    check('AJAX note with a file and no text saves', r.status_code == 200 and r.get_json().get('success') is True,
-+          f'{r.status_code} {r.get_data(as_text=True)[:200]}')
-+    r = sarah_c.post(url, data={'body': '', 'files': (io.BytesIO(b'MZ'), 'tool.exe')},
-+                     content_type='multipart/form-data', headers=XHR)
-+    check('AJAX note refuses a blocked file type', r.status_code == 400 and r.get_json().get('success') is not True,
-+          f'{r.status_code}')
-+    r = sarah_c.post(url, data={'body': ''}, headers=XHR)
-+    check('AJAX empty note is refused', r.status_code == 400, str(r.status_code))
++    # 5) Data entry user is still limited to their batch.
++    body = sarah_c.get('/invoices/?batch_id=1&search_type=serial&query=0005').get_data(as_text=True)
++    check('data entry search stays in batch 1', f"/invoices/{ids['b2_0005']}" not in body
++          and f"/invoices/{ids['b1_0005']}" in body)
++    check('data entry sees no all-batches banner', 'id="search-all-batches"' not in body)
 +
-+    # ---------------- mobile API: note with attachment ----------------
-+    r = sarah_c.post('/api/v1/invoices/0001/notes?batch_id=1', headers=H,
-+                     data={'body': '', 'file': (io.BytesIO(b'%PDF-1.4 phone scan'), 'phone.pdf')},
-+                     content_type='multipart/form-data')
-+    check('mobile API: attachment-only note from phone is saved', r.status_code == 201, f'{r.status_code} {r.get_data(as_text=True)[:200]}')
-+    if r.status_code == 201:
-+        notes = r.get_json()['history']['notes']
-+        check('mobile API: the new note carries the attachment',
-+              any(n.get('attachments') and n['attachments'][0]['file_name'] == 'phone.pdf' for n in notes))
++    # 6) AJAX search endpoint: all batches for admin, each row carries batch_name.
++    r = admin_c.get('/invoices/search?query=0005&search_type=serial',
++                    headers={'X-Requested-With': 'XMLHttpRequest'})
++    data = r.get_json()
++    names = sorted((item['batch_id'], item['batch_name']) for item in data['results'])
++    check('AJAX admin search returns both batches', names == [(1, 'Batch 1'), (2, 'Batch Two')], str(names))
 +
-+    # ---------------- permissions still enforced ----------------
-+    with app.app_context():
-+        db.session.add(UserCapability(user_id=ids['sarah_id'], capability='notes.create', allowed=False))
-+        db.session.commit()
-+    r = sarah_c.post(url, data={'body': 'blocked'}, headers=XHR)
-+    check('AJAX note blocked when notes.create is off', r.status_code == 403, str(r.status_code))
-+    r = sarah_c.get(base + '&serial=0002', headers=XHR)
-+    check('lookup still works without notes.create', r.status_code == 200 and r.get_json().get('found') is True)
-+    with app.app_context():
-+        UserCapability.query.filter_by(user_id=ids['sarah_id']).delete()
-+        db.session.commit()
++    r = sarah_c.get('/invoices/search?query=0005&search_type=serial&batch_id=1',
++                    headers={'X-Requested-With': 'XMLHttpRequest'})
++    check('AJAX data entry search is not cross-batch by default',
++          all(item['batch_id'] == 1 for item in r.get_json()['results']))
 +
-+    # ---------------- rendered invoice page ----------------
-+    r = sarah_c.get(f"/invoices/{ids['mine']}?batch_id=1")
-+    page = r.get_data(as_text=True)
-+    check('invoice page renders', r.status_code == 200, str(r.status_code))
-+    check('page has the note QR modal', 'id="noteQrModal"' in page)
-+    check('note QR image asks for target=note', 'target=note' in page and 'scan=focus' in page)
-+    check('page has the live link preview box', 'id="link-preview"' in page and 'id="link-submit"' in page)
-+    check('link and note forms submit in the background',
-+          'data-history-form id="link-form"' in page and 'data-history-form id="note-form"' in page)
-+    check('note file input no longer restricts types', 'accept=".pdf,.png' not in page)
++    # 7) Mobile API: admin search ignores batch selection and returns batch labels.
++    api = app.test_client()
++    r = api.get('/api/v1/invoices?q=0005', headers={'X-API-Key': 'admin-key-789'})
++    payload = r.get_json()
++    check('mobile admin search returns 200', r.status_code == 200, str(r.status_code))
++    got = sorted(item['batch_id'] for item in payload['invoices'])
++    check('mobile admin search returns both batches', got == [1, 2], str(got))
++    check('mobile results include batch_name',
++          all(item.get('batch_name') for item in payload['invoices']))
 +
-+    print(f'\nALL {len(PASSED)} NOTE-QR / LOOKUP CHECKS PASSED')
++    r = api.get('/api/v1/invoices?q=0005&batch_id=1', headers={'X-API-Key': 'sarah-key-123'})
++    got = sorted(item['batch_id'] for item in r.get_json()['invoices'])
++    check('mobile data entry search stays in batch 1', got == [1], str(got))
++
++    # 8) Link lookup stays inside the viewed batch (linking across batches is not allowed).
++    r = admin_c.get('/invoices/link-lookup?batch_id=1&serial=0009&current=0')
++    check('link lookup does not find a batch 2 invoice from batch 1',
++          r.status_code in (400, 404) or r.get_json().get('found') is False, str(r.status_code))
++
++    print(f'\nALL {len(PASSED)} ADMIN ALL-BATCH SEARCH CHECKS PASSED')
 +
 +
 +if __name__ == '__main__':
 +    main()
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/screenshots/verify_ui.mjs /home/user/work/invoiceflow-server/server/qa/screenshots/verify_ui.mjs
---- base/invoiceflow-server/server/qa/screenshots/verify_ui.mjs	1970-01-01 00:00:00.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/qa/screenshots/verify_ui.mjs	2026-10-17 17:05:05.207683934 +0000
-@@ -0,0 +1,94 @@
-+// Browser checks for the link lookup, background forms and note QR (run against qa/screenshots/demo_server.py).
-+// Run:  LD_LIBRARY_PATH=<dir with al2023 libs> node verify_ui.mjs <output dir>
-+// Needs: npm i @sparticuz/chromium playwright-core
-+import chromium from '@sparticuz/chromium';
-+import { chromium as pw } from 'playwright-core';
-+import { mkdirSync } from 'node:fs';
-+
-+const BASE = process.env.DEMO_BASE || 'http://127.0.0.1:5055';
-+const OUT = process.argv[2] || './ui-check-out';
-+mkdirSync(OUT, { recursive: true });
-+
-+const results = [];
-+function check(label, ok, extra = '') {
-+  results.push({ label, ok });
-+  console.log(ok ? 'PASS' : 'FAIL', label, ok ? '' : extra);
-+}
-+
-+const browser = await pw.launch({ executablePath: await chromium.executablePath(), args: chromium.args, headless: true });
-+const context = await browser.newContext({ viewport: { width: 1366, height: 900 }, deviceScaleFactor: 1 });
-+const page = await context.newPage();
-+const pageErrors = [];
-+page.on('pageerror', e => pageErrors.push(String(e)));
-+
-+await page.goto(`${BASE}/auth/login`, { waitUntil: 'domcontentloaded' });
-+await page.fill('input[name=username]', 'sarah');
-+await page.fill('input[name=password]', 'Sarah@12345');
-+await Promise.all([page.waitForLoadState('domcontentloaded'), page.click('button[type=submit], input[type=submit]')]);
-+
-+await page.goto(`${BASE}/invoices/1?batch_id=1`, { waitUntil: 'domcontentloaded' });
-+await page.waitForTimeout(800);
-+
-+// ---- link lookup preview
-+await page.evaluate(() => { window.__noReload = 'still-here'; });
-+await page.fill('#link-serial', '0003');
-+await page.waitForFunction(() => document.getElementById('link-preview')?.textContent.includes('#0003'), null, { timeout: 5000 })
-+  .catch(() => {});
-+const previewText = await page.locator('#link-preview').innerText().catch(() => '');
-+check('lookup shows the other invoice (serial and date)', previewText.includes('#0003') && previewText.includes('2026-10-15'), previewText);
-+check('lookup shows the total', /Total\s+\d+\.\d{3}/.test(previewText), previewText);
-+check('submit enabled once the invoice is found', await page.locator('#link-submit').isEnabled());
-+await page.locator('#link-form').screenshot({ path: `${OUT}/13-link-lookup-preview.png` });
-+
-+await page.fill('#link-serial', '9999');
-+await page.waitForFunction(() => document.getElementById('link-preview')?.textContent.includes('No invoice'), null, { timeout: 5000 })
-+  .catch(() => {});
-+check('missing serial says so', (await page.locator('#link-preview').innerText()).includes('No invoice 9999'));
-+check('submit disabled for a missing serial', !(await page.locator('#link-submit').isEnabled()));
-+
-+// ---- link without a page reload; history list updates in place
-+await page.fill('#link-serial', '0003');
-+await page.waitForFunction(() => document.getElementById('link-preview')?.textContent.includes('#0003'), null, { timeout: 5000 })
-+  .catch(() => {});
-+await page.click('#link-submit');
-+await page.waitForFunction(() => document.getElementById('link-serial')?.value === '', null, { timeout: 8000 }).catch(() => {});
-+const noReload = await page.evaluate(() => window.__noReload);
-+check('linking does not reload the page', noReload === 'still-here', String(noReload));
-+check('form clears after a successful link', (await page.locator('#link-serial').inputValue()) === '');
-+// The list refreshes in the background after the form clears; wait for it (no reload).
-+await page.waitForFunction(() => document.getElementById('invoice-history')?.innerText.includes('0003'), null, { timeout: 8000 })
-+  .catch(() => {});
-+const historyText = await page.locator('#invoice-history').innerText();
-+check('history shows the new link without a page reload', historyText.includes('0003') && noReload === 'still-here', historyText.slice(0, 300));
-+
-+// ---- typed text survives a background refresh
-+await page.fill('#note-form textarea[name=body]', 'draft note 123 — keep me');
-+await page.evaluate(() => window.InvoiceLive && window.InvoiceLive.refresh());
-+await page.waitForTimeout(1200);
-+const draft = await page.locator('#note-form textarea[name=body]').inputValue();
-+check('typed note text is not wiped by a background refresh', draft === 'draft note 123 — keep me', draft);
-+
-+// ---- note saved in the background; the notes list updates without a reload
-+await page.fill('#note-form textarea[name=body]', 'Phone check note');
-+await page.click('#note-form button[type=submit]');
-+await page.waitForFunction(() => document.getElementById('live-notes')?.innerText.includes('Phone check note'), null, { timeout: 8000 })
-+  .catch(() => {});
-+check('note list updates in the background',
-+  (await page.locator('#live-notes').innerText()).includes('Phone check note') && (await page.evaluate(() => window.__noReload)) === 'still-here');
-+check('note form clears after saving', (await page.locator('#note-form textarea[name=body]').inputValue()) === '');
-+
-+// ---- note QR modal
-+await page.getByRole('button', { name: /Note QR/ }).click();
-+await page.waitForTimeout(700);
-+const src = await page.locator('#noteQrModal img').getAttribute('src');
-+check('note QR points at target=note focus QR', !!src && src.includes('target=note') && src.includes('scan=focus'), String(src));
-+const qrOk = await page.evaluate(async (s) => (await fetch(s, { credentials: 'same-origin' })).ok, src);
-+check('note QR image loads for the signed-in user', qrOk);
-+await page.locator('#noteQrModal .modal-content').screenshot({ path: `${OUT}/14-note-qr-modal.png` });
-+
-+check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
-+
-+await browser.close();
-+const failed = results.filter(r => !r.ok);
-+console.log(`\n${results.length - failed.length}/${results.length} UI checks passed`);
-+process.exit(failed.length ? 1 : 0);
