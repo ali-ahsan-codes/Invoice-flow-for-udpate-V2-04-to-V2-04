@@ -1,819 +1,260 @@
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/DEPLOY-CHECKLIST.md /home/user/work/invoiceflow-server/server/DEPLOY-CHECKLIST.md
---- base/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 15:55:34.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 17:08:28.828712421 +0000
-@@ -15,10 +15,12 @@
- | Mobile API (`/api/v1`) | New, all with `X-API-Key` and `batch_id`: `GET /invoices/<serial>/history`, `POST /invoices/<serial>/notes`, `DELETE /invoices/<serial>/notes/<id>`, `GET /invoices/<serial>/notes/attachments/<media_id>`, `POST /invoices/<serial>/links`, `DELETE /invoices/<serial>/links/<id>`. `GET /me` now also returns `capabilities`. Existing endpoints are unchanged. |
- | Upload types | `ALLOWED_EXTENSIONS` covers ordinary documents and images (PDF, Word, Excel, CSV, PowerPoint, text, images incl. WEBP/HEIC, zip/7z/rar). Executables, scripts, HTML and SVG are refused. Type is decided by the file extension. |
- | Fixes | Sample CSV download (`/import-export/sample-csv`) no longer fails with a NameError. CSV export no longer crashes for users without export permission. Dead code removed (unused imports and functions). |
--| Android | *Notes & links* screen for the focused invoice. Actions follow the admin's switches; a clerk whose mobile access is off cannot connect. Install the new APK. |
-+| Android | *Notes & links* screen for the focused invoice. Actions follow the admin's switches; a clerk whose mobile access is off cannot connect. **Note attachment QR:** on the invoice page (Notes & comments → *Note QR*) print or show the QR; scanning it with the app opens that invoice's Notes sheet and the file picker, and the chosen files are saved as a note. Install the new APK. |
-+| Web | Link form shows the other invoice (date, serial, book/page, total) as you type the serial, and refuses unknown or hidden serials. Linking and adding notes happen in the background: the typed text stays and the lists update without a page reload. Attachment types follow the server allow-list (no narrow browser filter). |
-+| Security | Invoice QR image URLs (`/media/qr/...`) now require login and access to the invoice (before they were public). |
- | Files | Note attachments are stored under `UPLOAD_FOLDER/invoice_<id>/notes/`. |
+diff -ruN -x __pycache__ pa/invoiceflow-server/server/DEPLOY-CHECKLIST.md pb/invoiceflow-server/server/DEPLOY-CHECKLIST.md
+--- a/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 17:51:09.202065692 +0000
++++ b/invoiceflow-server/server/DEPLOY-CHECKLIST.md	2026-10-17 17:51:09.210065732 +0000
+@@ -172,3 +172,11 @@
+ - Smoke test: open an invoice, type a serial in *Link another invoice* (preview must appear), link it (no page reload, list updates), add a note with a PDF (appears in the list), scan the Note QR with the phone, pick a file, and confirm it appears as a note attachment.
+ - Browser test: `node qa/screenshots/verify_ui.mjs <dir>` against the demo server (`qa/screenshots/demo_server.py`).
  
--### 1a. Permissions (Admin → Users → key icon)
-+### 1a. Permissions (Admin → Users → Permissions button on each user row)
++
++## 11. Release addendum: background sync fix
++
++- No database change in this release. Do not run any SQL for it.
++- Replace the application files, including `app/static/js/realtime.js`, then restart the server (Waitress/Gunicorn/service). A restart is needed because the server caches the Python code.
++- Users who had a page open can press Ctrl+F5 once. Static files are revalidated, but an open tab keeps its old script until reload.
++- Check after deploy: open the invoice view in two browsers. Change the invoice total in one browser. The total in the other browser should update within a few seconds and show "Live" in the top bar.
++- If "Reconnecting…" stays on the top bar, check `/live/version` in the browser. It must return JSON with a `revision` after login.
+diff -ruN -x __pycache__ pa/invoiceflow-server/server/TEST-REPORT-invoice-history.md pb/invoiceflow-server/server/TEST-REPORT-invoice-history.md
+--- a/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:51:09.202065692 +0000
++++ b/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:51:09.210065732 +0000
+@@ -72,3 +72,23 @@
  
- Each data-entry user has these switches (admins always have everything):
+ Not run here: Gradle build and Android unit tests (no JDK/SDK in the sandbox). Android Kotlin syntax was checked with tree-sitter-kotlin (24 files, 0 parse errors); type checking still needs Android Studio. Also not run: MySQL-backed and live-server suites (see Round 3).
  
-@@ -126,7 +128,7 @@
- 
- Smoke test:
- 
--1. Sign in as admin → **Users** → key icon on a data-entry user → turn **Link invoices** off → Save.
-+1. Sign in as admin → **Users** → Permissions button on a data-entry user → turn **Link invoices** off → Save.
- 2. Sign in as that user → open an invoice → the link form is hidden. Turn it back on as admin.
- 3. Open an invoice → add a note with a PDF → it appears; download the attachment.
- 4. Link two invoices (relation only, no amount) → both show the link.
-@@ -161,3 +163,12 @@
- 1. Restore the production backup into a staging schema.
- 2. Run section 3 and section 6 against staging.
- 3. Run the smoke test in section 6 and one cross-batch link.
 +
-+## 10. Release addendum: note-attachment QR, link lookup, background sync
++## Round 5: background sync (auto refresh) fix
 +
-+- No database change in this addendum. Steps 3 and 6 above are unchanged.
-+- Deploy the server first, then install the new Android APK on the phones (the old app ignores the new `target` field and keeps uploading to the invoice, so it is safe to roll out in either order).
-+- Print or show the **Note QR** for an invoice from its page. The QR is per invoice and works for any batch the user can access.
-+- Smoke test: open an invoice, type a serial in *Link another invoice* (preview must appear), link it (no page reload, list updates), add a note with a PDF (appears in the list), scan the Note QR with the phone, pick a file, and confirm it appears as a note attachment.
-+- Browser test: `node qa/screenshots/verify_ui.mjs <dir>` against the demo server (`qa/screenshots/demo_server.py`).
++Symptom: pages needed a manual refresh after another user or device changed data.
 +
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/ROUTES.md /home/user/work/invoiceflow-server/server/ROUTES.md
---- base/invoiceflow-server/server/ROUTES.md	2026-10-17 15:55:40.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/ROUTES.md	2026-10-17 17:08:28.828712421 +0000
-@@ -60,6 +60,7 @@
- | `/invoices/<int:id>/history` | GET | `invoices.history_json` |
- | `/invoices/<int:id>/links` | POST | `invoices.link_create` |
- | `/invoices/<int:id>/links/<int:link_id>/delete` | POST | `invoices.link_delete` |
-+| `/invoices/link-lookup` | GET | `invoices.link_lookup` (JSON preview of another invoice for the link form: `batch_id`, `serial`, `current`) |
- | `/invoices/<int:id>/notes` | POST | `invoices.note_create` |
- | `/invoices/<int:id>/notes/<int:note_id>/delete` | POST | `invoices.note_delete` |
- | `/invoices/<int:id>/notes/attachments/<int:media_id>` | GET | `invoices.note_attachment` |
-@@ -85,8 +86,8 @@
- | `/media/download/<int:media_id>` | GET | `media.download` |
- | `/media/m/<serial>` | GET | `media.mobile_scan` |
- | `/media/qr-sheet` | GET | `media.qr_sheet` |
--| `/media/qr/<serial>.png` | GET | `media.qr_png` |
--| `/media/qr/<serial>.svg` | GET | `media.qr_svg` |
-+| `/media/qr/<serial>.png` | GET | `media.qr_png` (login required; `mode`, `scan`, `target=invoice|note`) |
-+| `/media/qr/<serial>.svg` | GET | `media.qr_svg` (login required; `mode`, `scan`, `target=invoice|note`) |
- | `/media/scan` | GET | `media.scan_page` |
- | `/media/scan-upload/<int:invoice_id>` | POST | `media.scan_upload` |
- | `/media/thumb/<int:media_id>` | GET | `media.thumb` |
-@@ -147,3 +148,16 @@
- - `POST /invoices/<serial>/links` JSON or form: `linked_serial`, `linked_batch_id`, `link_type`, `amount_action`, `exclude_from_totals` (bool), `link_note`. Returns 201 with `link_id`.
- - `DELETE /invoices/<serial>/links/<link_id>`
- 
-+## Note attachments from the phone (QR `target`)
++Root cause (confirmed in a browser test, not assumed): `realtime.js` treated any non-modal form on a page as an editor. The invoice view has note, link and delete forms, so the whole page was limited to live regions. The invoice's own total therefore stayed stale until a manual reload. Dashboard, summary, invoice list and analytics already updated in the same test.
 +
-+The invoice QR payload (`mode=app`) has a `target` field:
-+- `invoice` (default): scan opens the invoice for document uploads, as before.
-+- `note`: scan focuses the invoice, opens its Notes sheet and asks for files. The files are saved as a new note with attachments.
++Fix: only the invoice editor (`form.invoice-form`) and upload file inputs (not the note attachment input) count as editors. Typed or focused fields are still protected by `retain()`, and any dirty field still falls back to region-only updates.
 +
-+The web page shows this QR in the **Note QR** button on the Notes & comments card. Mobile API for the save: `POST /api/v1/invoices/<serial>/notes?batch_id=` (multipart `file` or `files`, optional `body`, requires `notes.create`).
++Browser evidence (`qa/live_sync_browser_check.py`, Chromium, SQLite demo server):
++- Old `realtime.js`: 9 / 10. Invoice view total did not update (FAIL).
++- New `realtime.js`: 10 / 10. Dashboard, summary, invoice list, invoice view and analytics update without reload. A note draft keeps its text and focus. An editor amount draft is kept and the editor is not reloaded.
 +
-+## Live link lookup and background forms
++Known limit: the grid page shows a serial and date presence matrix, so a total change is not visible there. Its refresh request runs, but it is not asserted by the browser check.
 +
-+- `GET /invoices/link-lookup?batch_id=&serial=&current=` returns `{found, invoice:{serial_number,date,book,page,total_amount,amounts,batch_name,...}}` or `{found:false, message}`. Only invoices the user may access are returned.
-+- The link form and the note form submit in the background (`data-history-form`): typed text is kept, the form clears on success, and the Linked invoices / Notes lists refresh in place (`data-live-region data-live-allow-forms`).
++Harness changes (test only, `qa/sqlite_harness.py`): MySQL functions `concat`, `lpad`, `date_format`, `dayname` and `hour` are registered for SQLite so the reporting pages run in the demo. Production code is unchanged.
 +
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/TEST-REPORT-invoice-history.md /home/user/work/invoiceflow-server/server/TEST-REPORT-invoice-history.md
---- base/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 16:01:01.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/TEST-REPORT-invoice-history.md	2026-10-17 17:08:28.828712421 +0000
-@@ -52,3 +52,23 @@
- Screenshots: `docs/screenshots/` (12 PNG, captured with headless Chromium from `qa/screenshots/demo_server.py` + `take_shots.mjs`). Demo accounts are synthetic.
- 
- Android (not compiled; no JDK/SDK in the sandbox): new `PermissionsModelTest.kt` (pure JVM), gating in `MainViewModel`, `ScanScreen`, `InvoiceHistoryScreen`, `Me.capabilities` parsing in `ApiService.ping`. Static brace-balance check: all files balanced. Removed unused `toggleManualCropEnabled`, `toggleAutoOpenHandles`, `CropSelection.toRect` and the template `ExampleUnitTest` / `ExampleRobolectricTest`.
++Server regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
 +
-+## Round 4: note-attachment QR, link lookup, background sync
-+
-+Server, SQLite harness:
-+- `qa/note_qr_and_lookup_test.py`: **32 / 32 pass**. Covers QR `target` payload (default invoice, unknown falls back), QR auth and owner access, link lookup (found, hidden, self, missing, empty, bad batch, login), AJAX note with text / file / blocked file type / empty, mobile API attachment-only note, `notes.create` off → 403, rendered page markers.
-+- `qa/mobile_qr_contract_test.py`: updated for the new `target` key (3/3).
-+- Re-run: `permissions_test.py` 67/67, `exclusion_and_mobile_api_test.py` 47/47, `invoice_history_test.py` 79/79.
-+
-+Browser (Chromium headless against `qa/screenshots/demo_server.py`), `qa/screenshots/verify_ui.mjs`: **14 / 14 pass**. Covers link preview, no-match message, submit disabled when not found, link without page reload, history list updates in the background, typed note text survives a background refresh, note saved in the background and list updated, Note QR modal image, no uncaught page errors.
-+
-+Bugs found and fixed in this round:
-+- Linked-invoices list did not update after linking (realtime.js skipped regions containing forms). The lists are now opt-in regions (`data-live-allow-forms`); typed or focused fields are still protected.
-+- Invoice QR endpoints were public. Now login and invoice access required.
-+- Note file picker used a narrow browser accept list. Now the server's allow-list decides.
-+- Link serial had no check until submit. Now live lookup.
-+
-+Screenshots: `docs/screenshots/` (14 PNG; 13 = link preview, 14 = Note QR modal). Demo accounts are synthetic.
-+
-+Not run here: Gradle build and Android unit tests (no JDK/SDK in the sandbox). Android Kotlin syntax was checked with tree-sitter-kotlin (24 files, 0 parse errors); type checking still needs Android Studio. Also not run: MySQL-backed and live-server suites (see Round 3).
-+
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/routes/invoices.py /home/user/work/invoiceflow-server/server/app/routes/invoices.py
---- base/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 15:52:55.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/routes/invoices.py	2026-10-17 16:57:44.249456690 +0000
-@@ -20,6 +20,7 @@
-     add_note, delete_note, create_link, delete_link, build_history, parse_bool,
-     count_links, count_notes, can_access_invoice, note_attachment_path,
-     get_invoice_any_batch,
-+    get_accessible_invoice_by_serial,
- )
- from app.utils.decorators import data_entry_required, owner_or_admin_required, capability_required
- from app.permissions import user_can
-@@ -1417,6 +1418,46 @@
-     return _history_reply(id, True, 'Invoice linked.')
- 
- 
-+@bp.route('/link-lookup')
-+@data_entry_required
-+def link_lookup():
-+    """Live preview for the link form: what invoice does this batch + serial point to?
-+
-+    Query: batch_id, serial, current (id of the invoice being viewed). Only invoices the
-+    current user may access are returned, so the preview never leaks hidden data.
-+    """
-+    serial = (request.args.get('serial') or '').strip().lstrip('#').strip()
-+    if not serial:
-+        return jsonify(found=False, message='')
-+    try:
-+        batch_id = int(request.args.get('batch_id') or 0) or None
-+    except ValueError:
-+        return jsonify(found=False, message='Choose a valid batch.'), 400
-+    if batch_id is None:
-+        batch_id = current_batch_id()
-+
-+    inv = get_accessible_invoice_by_serial(batch_id, serial, current_user)
-+    if not inv:
-+        return jsonify(found=False,
-+                       message=f'No invoice {serial} in that batch is available to you.')
-+    if str(inv.id) == (request.args.get('current') or ''):
-+        return jsonify(found=False, message='That is this invoice. Choose a different one.')
-+
-+    book, page = get_invoice_book_page(inv)
-+    return jsonify(found=True, invoice={
-+        'id': inv.id,
-+        'batch_id': inv.batch_id,
-+        'batch_name': inv.batch.name if inv.batch else '',
-+        'serial_number': inv.serial_number,
-+        'date': inv.date.isoformat() if inv.date else '',
-+        'book': book,
-+        'page': page,
-+        'total_amount': float(inv.total_amount or 0),
-+        'amounts': inv.get_amounts(),
-+        'created_by': inv.creator.username if inv.creator else None,
-+    })
-+
-+
- @bp.route('/<int:id>/links/<int:link_id>/delete', methods=['POST'])
- @data_entry_required
- @owner_or_admin_required(Invoice, 'id')
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/routes/media.py /home/user/work/invoiceflow-server/server/app/routes/media.py
---- base/invoiceflow-server/server/app/routes/media.py	2026-10-17 15:52:55.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/routes/media.py	2026-10-17 16:58:26.433669762 +0000
-@@ -17,6 +17,7 @@
- from app.services.invoice_service import get_invoice_by_id
- from app.services.audit_service import log_action
- from app.utils.decorators import data_entry_required, admin_required, owner_or_admin_required, capability_required
-+from app.services.invoice_history_service import can_access_invoice
- from app.utils.helpers import get_client_ip, allowed_file, generate_unique_filename, format_file_size, get_invoice_book_page
- 
- bp = Blueprint('media', __name__, url_prefix='/media')
-@@ -89,7 +90,7 @@
- # QR payload builder
- # ============================================================
- 
--def _build_invoice_qr_payload(invoice, mode='web', scan='auto'):
-+def _build_invoice_qr_payload(invoice, mode='web', scan='auto', target='invoice'):
-     """
-     Build the string encoded into the invoice QR.
- 
-@@ -102,9 +103,16 @@
-                 Used on printed sheets where you scan one after another.
-       'focus' — app locks onto this invoice (FOCUS mode).
-                 Used when printing a QR for one specific invoice.
-+
-+    target (only meaningful when mode='app'):
-+      'invoice' — scanning opens the invoice for document uploads (default).
-+      'note'    — scanning opens the invoice's Notes sheet and starts a note
-+                  attachment, so the photo/file becomes a note attachment.
-     """
-     if scan not in ('auto', 'focus'):
-         scan = 'auto'
-+    if target not in ('invoice', 'note'):
-+        target = 'invoice'
- 
-     if mode == 'app':
-         payload = {
-@@ -115,6 +123,7 @@
-             'serial': invoice.serial_number,
-             'base_url': request.url_root.rstrip('/'),
-             'scan': scan,
-+            'target': target,
++Not verified here: MySQL runtime (no MySQL server in the sandbox), and the Android build (no JDK/SDK).
+diff -ruN -x __pycache__ pa/invoiceflow-server/server/app/static/js/realtime.js pb/invoiceflow-server/server/app/static/js/realtime.js
+--- a/invoiceflow-server/server/app/static/js/realtime.js	2026-10-17 17:51:09.202065692 +0000
++++ b/invoiceflow-server/server/app/static/js/realtime.js	2026-10-17 17:51:09.210065732 +0000
+@@ -109,8 +109,10 @@
          }
-         return json.dumps(payload, separators=(',', ':'))
- 
-@@ -127,14 +136,19 @@
- # ============================================================
- 
- @bp.route('/qr/<serial>.svg')
-+@login_required
-+@data_entry_required
- def qr_svg(serial):
-     invoice = _lookup_invoice_by_serial(serial)
-     if not invoice:
-         abort(404)
-+    if not can_access_invoice(invoice, current_user):
-+        abort(404)
- 
-     mode = (request.args.get('mode') or 'web').lower()
-     scan = (request.args.get('scan') or 'auto').lower()
--    payload = _build_invoice_qr_payload(invoice, mode, scan)
-+    target = (request.args.get('target') or 'invoice').lower()
-+    payload = _build_invoice_qr_payload(invoice, mode, scan, target)
- 
-     try:
-         import qrcode
-@@ -149,7 +163,7 @@
-         img.save(buf)
-         buf.seek(0)
-         resp = send_file(buf, mimetype='image/svg+xml',
--                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}.svg')
-+                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}_{target}.svg')
-         resp.headers['Cache-Control'] = 'private, no-store'
-         return resp
-     except ImportError:
-@@ -157,14 +171,19 @@
- 
- 
- @bp.route('/qr/<serial>.png')
-+@login_required
-+@data_entry_required
- def qr_png(serial):
-     invoice = _lookup_invoice_by_serial(serial)
-     if not invoice:
-         abort(404)
-+    if not can_access_invoice(invoice, current_user):
-+        abort(404)
- 
-     mode = (request.args.get('mode') or 'web').lower()
-     scan = (request.args.get('scan') or 'auto').lower()
--    payload = _build_invoice_qr_payload(invoice, mode, scan)
-+    target = (request.args.get('target') or 'invoice').lower()
-+    payload = _build_invoice_qr_payload(invoice, mode, scan, target)
- 
-     try:
-         import qrcode
-@@ -177,7 +196,7 @@
-         img.save(buf, format='PNG')
-         buf.seek(0)
-         resp = send_file(buf, mimetype='image/png',
--                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}.png')
-+                         download_name=f'invoice_{invoice.serial_number}_qr_{mode}_{scan}_{target}.png')
-         resp.headers['Cache-Control'] = 'private, no-store'
-         return resp
-     except ImportError:
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/static/js/realtime.js /home/user/work/invoiceflow-server/server/app/static/js/realtime.js
---- base/invoiceflow-server/server/app/static/js/realtime.js	2026-10-10 08:56:56.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/static/js/realtime.js	2026-10-17 17:03:44.971278672 +0000
-@@ -141,7 +141,10 @@
-                 old.querySelectorAll('[data-live-region][id]').forEach(region => {
-                     const replacement=next.querySelector('#'+CSS.escape(region.id));
-                     if(replacement?.dataset.batchWritable)region.dataset.batchWritable=replacement.dataset.batchWritable;
--                    if(replacement && !region.querySelector('form,input,textarea,select') && region.innerHTML!==replacement.innerHTML)
-+                    // Regions with forms are updated only when explicitly opted in (data-live-allow-forms).
-+                    // retain() still keeps any form, input or select the user has typed in or focused.
-+                    const mayHoldForms = region.hasAttribute('data-live-allow-forms');
-+                    if(replacement && (mayHoldForms || !region.querySelector('form,input,textarea,select')) && region.innerHTML!==replacement.innerHTML)
-                         Idiomorph.morph(region,replacement.innerHTML,{morphStyle:'innerHTML',callbacks});
-                 });
-             } else if (old.innerHTML !== next.innerHTML) {
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/app/templates/invoices/view.html /home/user/work/invoiceflow-server/server/app/templates/invoices/view.html
---- base/invoiceflow-server/server/app/templates/invoices/view.html	2026-10-17 15:48:47.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/app/templates/invoices/view.html	2026-10-17 17:04:03.671373103 +0000
-@@ -328,6 +328,7 @@
-                         <div class="col-lg-5">
-                             <h6 class="text-muted text-uppercase small fw-bold mb-3">Linked invoices</h6>
- 
-+                            <div id="live-links" data-live-region data-live-allow-forms>
-                             {% for rel in history.relations %}
-                             <div class="border rounded p-2 mb-2">
-                                 <div class="d-flex justify-content-between align-items-start gap-2">
-@@ -372,22 +373,25 @@
-                             {% else %}
-                             <p class="text-muted small mb-2">No linked invoices.</p>
-                             {% endfor %}
-+</div>
- 
-                             {% if history.hidden_link_count %}
-                             <p class="text-muted small mb-2"><i class="fas fa-lock me-1"></i>{{ history.hidden_link_count }} linked invoice(s) not visible to you.</p>
-                             {% endif %}
- 
-                                                         {% if can('links.create') %}
--                            <form method="POST" action="{{ url_for('invoices.link_create', id=invoice.id, batch_id=invoice.batch_id) }}" class="border-top pt-3 mt-3">
-+                            <form method="POST" action="{{ url_for('invoices.link_create', id=invoice.id, batch_id=invoice.batch_id) }}"
-+                                  class="border-top pt-3 mt-3" data-history-form id="link-form">
-                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                 <h6 class="small fw-bold mb-2">Link another invoice</h6>
--                                <select name="linked_batch_id" class="form-select form-select-sm mb-2">
-+                                <select name="linked_batch_id" id="link-batch" class="form-select form-select-sm mb-2">
-                                     {% for b in batches %}
-                                     <option value="{{ b.id }}" {% if b.id == invoice.batch_id %}selected{% endif %}>{{ b.name }}{% if b.id == invoice.batch_id %} (this invoice's batch){% endif %}</option>
-                                     {% endfor %}
-                                 </select>
--                                <input type="text" name="linked_serial" class="form-control form-control-sm mb-2"
--                                       inputmode="numeric" placeholder="Serial of the other invoice, e.g. 0042" required>
-+                                <input type="text" name="linked_serial" id="link-serial" class="form-control form-control-sm mb-2"
-+                                       inputmode="numeric" autocomplete="off" placeholder="Serial of the other invoice, e.g. 0042" required>
-+                                <div id="link-preview" class="small mb-2" aria-live="polite"></div>
-                                 <select name="link_type" class="form-select form-select-sm mb-2">
-                                     <option value="related">Related (relation only)</option>
-                                     <option value="duplicate">Duplicate of that invoice</option>
-@@ -403,30 +407,37 @@
-                                 </select>
-                                 <input type="text" name="link_note" class="form-control form-control-sm mb-2" maxlength="2000"
-                                        placeholder="Reason (optional)">
--                                <button type="submit" class="btn btn-sm btn-outline-primary w-100">
-+                                <button type="submit" id="link-submit" class="btn btn-sm btn-outline-primary w-100" disabled>
-                                     <i class="fas fa-link me-1"></i>Link invoice
-                                 </button>
-+                                <div class="text-danger small mt-2 history-form-error" hidden></div>
-                             </form>
-                             {% endif %}
-                         </div>
- 
-                         <div class="col-lg-7">
--                            <h6 class="text-muted text-uppercase small fw-bold mb-3">Notes &amp; comments</h6>
-+                            <div class="d-flex justify-content-between align-items-center mb-3">
-+                                <h6 class="text-muted text-uppercase small fw-bold mb-0">Notes &amp; comments</h6>
-+                                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#noteQrModal">
-+                                    <i class="fas fa-qrcode me-1"></i>Note QR
-+                                </button>
-+                            </div>
- 
-                                                         {% if can('notes.create') %}
--                            <form method="POST" enctype="multipart/form-data"
-+                            <form method="POST" enctype="multipart/form-data" data-history-form id="note-form"
-                                   action="{{ url_for('invoices.note_create', id=invoice.id, batch_id=invoice.batch_id) }}" class="mb-3">
-                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                 <textarea name="body" class="form-control form-control-sm mb-2" rows="2" maxlength="2000"
-                                           placeholder="Write a note (optional if you attach a file)"></textarea>
--                                <input type="file" name="files" class="form-control form-control-sm mb-2" multiple
--                                       accept=".pdf,.png,.jpg,.jpeg,.gif,.doc,.docx">
-+                                <input type="file" name="files" id="note-files" class="form-control form-control-sm mb-2" multiple>
-+                                <div class="text-danger small mb-2 history-form-error" hidden></div>
-                                 <button type="submit" class="btn btn-sm btn-primary">
-                                     <i class="fas fa-comment-medical me-1"></i>Add note
-                                 </button>
-                             </form>
-                             {% endif %}
- 
-+                            <div id="live-notes" data-live-region data-live-allow-forms>
-                             {% for note in history.notes %}
-                             <div class="border rounded p-2 mb-2">
-                                 <div class="d-flex justify-content-between align-items-center small text-muted mb-1">
-@@ -469,6 +480,7 @@
-                             {% else %}
-                             <p class="text-muted small">No notes yet. Notes from linked invoices also appear here.</p>
-                             {% endfor %}
-+                            </div>
-                         </div>
-                     </div>
-                 </div>
-@@ -525,6 +537,31 @@
- {% endblock %}
- 
- {% block scripts %}
-+<div class="modal fade" id="noteQrModal" tabindex="-1" aria-labelledby="noteQrTitle" aria-hidden="true">
-+    <div class="modal-dialog modal-dialog-centered modal-sm">
-+        <div class="modal-content">
-+            <div class="modal-header">
-+                <h5 class="modal-title" id="noteQrTitle">Note attachment QR</h5>
-+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-+            </div>
-+            <div class="modal-body text-center">
-+                <img src="{{ url_for('media.qr_svg', serial=invoice.serial_number, batch_id=invoice.batch_id, mode='app', scan='focus', target='note') }}"
-+                     alt="Scan to attach a file to a note on invoice {{ invoice.serial_number }}" width="240" height="240" class="img-fluid">
-+                <p class="small text-muted mt-3 mb-0">
-+                    Scan this with the InvoiceFlow app on invoice #{{ invoice.serial_number }}.
-+                    The photo or file becomes an attachment on a new note.
-+                </p>
-+            </div>
-+            <div class="modal-footer justify-content-between">
-+                <a class="btn btn-sm btn-outline-secondary"
-+                   href="{{ url_for('media.qr_svg', serial=invoice.serial_number, batch_id=invoice.batch_id, mode='app', scan='focus', target='note') }}" download>
-+                    <i class="fas fa-download me-1"></i>Download
-+                </a>
-+                <button type="button" class="btn btn-sm btn-primary" data-bs-dismiss="modal">Done</button>
-+            </div>
-+        </div>
-+    </div>
-+</div>
- <script>
-     let deleteModal = null, deleteForm = null;
-     let deleteMediaModal = null, deleteMediaForm = null;
-@@ -559,6 +596,127 @@
-         const btn = this.querySelector('button[type="submit"]');
-         if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Deleting...'; }
-     });
+         // Never morph a form's ancestor: morph libraries can replace wrappers and
+         // detach the original form even when its own removal callback vetoes it.
+-        const hasEditor = [...old.querySelectorAll('form')].some(f =>
+-            !f.closest('.modal')) || !!old.querySelector('input[type="file"]');
++        // Only real entry forms (invoice editor) and upload inputs count as editors. Note/link
++        // forms are opt-in live regions and are protected by retain() while the user types.
++        const hasEditor = !!old.querySelector('form.invoice-form') ||
++            [...old.querySelectorAll('input[type="file"]')].some(input => !input.closest('[data-history-form]'));
+         const draft = old.querySelector('[data-live-dirty]');
+         const callbacks={beforeNodeMorphed:retain,beforeNodeRemoved(node){
+             if(node.nodeType===1 && node.matches('.modal,[data-live-preserve]'))return false;
+diff -ruN -x __pycache__ pa/invoiceflow-server/server/qa/live_sync_browser_check.py pb/invoiceflow-server/server/qa/live_sync_browser_check.py
+--- a/invoiceflow-server/server/qa/live_sync_browser_check.py	1970-01-01 00:00:00.000000000 +0000
++++ b/invoiceflow-server/server/qa/live_sync_browser_check.py	2026-10-17 17:51:09.206065712 +0000
+@@ -0,0 +1,152 @@
++"""Browser check for background live sync (realtime.js) against the SQLite demo server.
 +
-+    // ------------------------------------------------------------------
-+    // Link lookup + background-safe forms
-+    // Lookup shows the other invoice before you link it. Forms marked
-+    // data-history-form submit in the background, so the typed data is
-+    // never wiped by a refresh; the history list updates via InvoiceLive.
-+    // ------------------------------------------------------------------
-+    const LINK_LOOKUP_URL = "{{ url_for('invoices.link_lookup') }}";
-+    const CURRENT_INVOICE_ID = "{{ invoice.id }}";
-+    let linkLookupTimer = null, linkLookupSeq = 0, linkFound = false;
++Run while the demo server is up (python qa/screenshots/demo_server.py, port 5055) and after
++`rm -rf /tmp/ifh_*` so the database is fresh:
 +
-+    function escHtml(value) {
-+        return String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
-+    }
-+    function fmtAmount(value) {
-+        const n = typeof value === 'object' && value !== null ? Number(value.value ?? value.amount ?? 0) : Number(value);
-+        return Number.isFinite(n) ? n.toFixed(3) : '0.000';
-+    }
++    python qa/live_sync_browser_check.py
 +
-+    function renderLinkPreview(data) {
-+        const preview = document.getElementById('link-preview');
-+        const submit = document.getElementById('link-submit');
-+        if (!preview || !submit) return;
-+        linkFound = !!data.found;
-+        submit.disabled = !linkFound;
-+        if (!linkFound) {
-+            preview.innerHTML = data.message ? `<span class="text-muted">${escHtml(data.message)}</span>` : '';
-+            return;
-+        }
-+        const inv = data.invoice;
-+        const amounts = (inv.amounts || []).map(a => fmtAmount(a)).join(', ') || '—';
-+        const bookPage = inv.book ? `Book ${escHtml(inv.book)}${inv.page ? ', page ' + escHtml(inv.page) : ''}` : 'No book';
-+        preview.innerHTML = `
-+            <div class="border rounded p-2 bg-light">
-+                <div class="fw-semibold">#${escHtml(inv.serial_number)} · ${escHtml(inv.date)}</div>
-+                <div class="text-muted">${bookPage} · ${escHtml(inv.batch_name)}</div>
-+                <div>Total ${fmtAmount(inv.total_amount)} <span class="text-muted">(amounts: ${escHtml(amounts)})</span></div>
-+                ${inv.created_by ? `<div class="text-muted">Entered by ${escHtml(inv.created_by)}</div>` : ''}
-+            </div>`;
-+    }
++Environment overrides:
++    IFH_BASE         default http://127.0.0.1:5055
++    IFH_DB           path to the demo SQLite file (default: newest /tmp/ifh_*/test.db)
++    CHROMIUM_PATH    optional Chromium executable (default: Playwright's bundled browser)
 +
-+    function runLinkLookup() {
-+        const serialInput = document.getElementById('link-serial');
-+        const batchSelect = document.getElementById('link-batch');
-+        const preview = document.getElementById('link-preview');
-+        const submit = document.getElementById('link-submit');
-+        if (!serialInput || !batchSelect || !preview || !submit) return;
-+        const serial = serialInput.value.trim();
-+        if (!serial) {
-+            linkFound = false;
-+            preview.innerHTML = '';
-+            submit.disabled = true;
-+            return;
-+        }
-+        const seq = ++linkLookupSeq;
-+        const qs = new URLSearchParams({serial, batch_id: batchSelect.value, current: CURRENT_INVOICE_ID});
-+        fetch(LINK_LOOKUP_URL + '?' + qs.toString(), {
-+            credentials: 'same-origin',
-+            headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
-+        }).then(r => r.json()).then(data => {
-+            if (seq === linkLookupSeq) renderLinkPreview(data);
-+        }).catch(() => {
-+            if (seq !== linkLookupSeq) return;
-+            linkFound = false;
-+            submit.disabled = true;
-+            preview.innerHTML = '<span class="text-danger">Could not check this serial. Try again.</span>';
-+        });
-+    }
++Checks
++  1. Another "worker" changes invoices and bumps live_revision; each open page must update
++     without a reload (dashboard, summary, invoice list, invoice view, analytics).
++  2. Draft safety: a typed note draft and a focused field survive a background refresh,
++     and an invoice-editor amount draft is kept without reloading the editor.
 +
-+    document.addEventListener('input', event => {
-+        if (event.target && event.target.id === 'link-serial') {
-+            clearTimeout(linkLookupTimer);
-+            linkLookupTimer = setTimeout(runLinkLookup, 250);
-+        }
-+    });
-+    document.addEventListener('change', event => {
-+        if (event.target && event.target.id === 'link-batch') runLinkLookup();
-+    });
-+    // Live sync: if the other invoice changed (added, edited, deleted), re-check the preview.
-+    document.addEventListener('invoiceflow:updated', () => {
-+        const serialInput = document.getElementById('link-serial');
-+        if (serialInput && serialInput.value.trim()) runLinkLookup();
-+    });
-+
-+    document.addEventListener('submit', async event => {
-+        const form = event.target.closest ? event.target.closest('form[data-history-form]') : null;
-+        if (!form) return;
-+        event.preventDefault();
-+        if (form.dataset.submitting) return;
-+        form.dataset.submitting = '1';
-+        const btn = form.querySelector('[type=submit]');
-+        const errBox = form.querySelector('.history-form-error');
-+        const originalHtml = btn ? btn.innerHTML : '';
-+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Saving…'; }
-+        if (errBox) { errBox.hidden = true; errBox.textContent = ''; }
-+        try {
-+            const res = await fetch(form.action, {
-+                method: 'POST',
-+                body: new FormData(form),
-+                credentials: 'same-origin',
-+                headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
-+            });
-+            if (res.redirected) throw new Error('Your session or permissions changed. Sign in and try again.');
-+            const data = await res.json().catch(() => ({}));
-+            if (!res.ok || !data.success) throw new Error(data.error || 'Could not save. Try again.');
-+            form.reset();
-+            form.querySelectorAll('[data-live-dirty]').forEach(el => delete el.dataset.liveDirty);
-+            showToast(data.message || 'Saved.', 'success');
-+            if (form.id === 'link-form') runLinkLookup();
-+            if (window.InvoiceLive) await window.InvoiceLive.refresh();
-+        } catch (error) {
-+            if (errBox) { errBox.hidden = false; errBox.textContent = error.message; }
-+            else showToast(error.message, 'danger');
-+        } finally {
-+            delete form.dataset.submitting;
-+            if (btn) {
-+                btn.innerHTML = originalHtml;
-+                btn.disabled = form.id === 'link-form' ? !linkFound : false;
-+            }
-+        }
-+    });
- </script>
- {% endblock %}
- 
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/mobile_qr_contract_test.py /home/user/work/invoiceflow-server/server/qa/mobile_qr_contract_test.py
---- base/invoiceflow-server/server/qa/mobile_qr_contract_test.py	2026-10-10 09:06:09.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/qa/mobile_qr_contract_test.py	2026-10-17 17:00:15.162218923 +0000
-@@ -33,6 +33,7 @@
-             "serial": "0001",
-             "base_url": "https://invoice.example",
-             "scan": "focus",
-+            "target": "invoice",
-         },
-     )
- 
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/note_qr_and_lookup_test.py /home/user/work/invoiceflow-server/server/qa/note_qr_and_lookup_test.py
---- base/invoiceflow-server/server/qa/note_qr_and_lookup_test.py	1970-01-01 00:00:00.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/qa/note_qr_and_lookup_test.py	2026-10-17 16:59:57.738130927 +0000
-@@ -0,0 +1,170 @@
-+"""Tests for: note-attachment QR, live link lookup, background note/link forms, mobile note upload.
-+
-+Runs through the real Flask app on a temporary SQLite database (sqlite_harness.py).
-+Run: python qa/note_qr_and_lookup_test.py
++The grid page is not asserted here: it shows a serial/date presence matrix, so an amount
++change is not visible on it. Its refresh request is exercised by the same loop.
 +"""
-+import io
-+import json
++import glob
 +import os
++import subprocess
 +import sys
-+from datetime import date
-+from decimal import Decimal
++import time
 +
-+sys.path.insert(0, os.path.dirname(__file__))
-+import sqlite_harness as h  # noqa: E402
++from playwright.sync_api import sync_playwright
 +
-+app = h.make_app()
-+app.config['TESTING'] = True
-+
-+from app.extensions import db  # noqa: E402
-+from app.models import User, Invoice, UserCapability  # noqa: E402
-+from app.routes.media import _build_invoice_qr_payload  # noqa: E402
-+
-+PASSED = []
-+XHR = {'X-Requested-With': 'XMLHttpRequest'}
-+SARAH_KEY = 'sarah-key-123'
-+H = {'X-API-Key': SARAH_KEY}
++BASE = os.environ.get('IFH_BASE', 'http://127.0.0.1:5055')
++PAGES = ['/dashboard', '/invoices/summary', '/invoices/?batch_id=1', '/invoices/1', '/admin/analytics/']
++ADMIN = ('admin', 'Admin@12345')
++results = []
 +
 +
-+def check(label, cond, extra=''):
-+    if not cond:
-+        raise AssertionError(f'FAIL: {label} {extra}')
-+    PASSED.append(label)
-+    print('PASS', label)
++def demo_db():
++    if os.environ.get('IFH_DB'):
++        return os.environ['IFH_DB']
++    found = sorted(glob.glob('/tmp/ifh_*/test.db'), key=os.path.getmtime)
++    if not found:
++        sys.exit('No demo database found. Start qa/screenshots/demo_server.py first.')
++    return found[-1]
 +
 +
-+def setup_data():
-+    with app.app_context():
-+        sarah = User(username='sarah', email='sarah@x.test', role='data_entry', api_key=SARAH_KEY)
-+        sarah.set_password('Sarah@12345')
-+        omar = User(username='omar', email='omar@x.test', role='data_entry', api_key='omar-key-456')
-+        omar.set_password('Omar@12345')
-+        db.session.add_all([sarah, omar])
-+        db.session.flush()
-+
-+        def mk(serial, owner, amount):
-+            i = Invoice(batch_id=1, date=date(2026, 10, 15), serial_number=serial,
-+                        total_amount=Decimal(str(amount)), created_by=owner.id, updated_by=owner.id)
-+            i.set_amounts([float(amount)])
-+            db.session.add(i)
-+            db.session.flush()
-+            return i.id
-+
-+        ids = {'mine': mk('0001', sarah, 10.0), 'mine2': mk('0002', sarah, 20.0),
-+               'other': mk('0003', omar, 5.0), 'sarah_id': sarah.id}
-+        db.session.commit()
-+        return ids
++DB = demo_db()
 +
 +
-+def login(client, username, password):
-+    r = client.post('/auth/login', data={'username': username, 'password': password})
-+    assert r.status_code in (200, 302), r.status_code
++def external_write():
++    """Mimic a commit from another worker: change one invoice per batch and bump the revision.
++
++    The write runs in a clean environment so a LD_LIBRARY_PATH for Chromium cannot shadow
++    the system sqlite3 module.
++    """
++    env = {k: v for k, v in os.environ.items() if k != 'LD_LIBRARY_PATH'}
++    code = ("import sqlite3,sys,uuid;c=sqlite3.connect(sys.argv[1]);"
++            "c.execute('UPDATE invoices SET total_amount = total_amount + 1 "
++            "WHERE id IN (SELECT MIN(id) FROM invoices GROUP BY batch_id)');"
++            "c.execute('UPDATE live_revision SET token = ? WHERE id = 1',(uuid.uuid4().hex,));"
++            "c.commit();c.close()")
++    subprocess.run([sys.executable, '-c', code, DB], check=True, env=env)
 +
 +
-+def main():
-+    ids = setup_data()
-+    sarah_c = app.test_client()
-+    login(sarah_c, 'sarah', 'Sarah@12345')
-+    anon = app.test_client()
-+
-+    # ---------------- note-attachment QR ----------------
-+    with app.test_request_context('/'):
-+        inv = db.session.get(Invoice, ids['mine'])
-+        payload = json.loads(_build_invoice_qr_payload(inv, 'app', 'focus', 'note'))
-+        check('QR payload carries target=note', payload.get('target') == 'note', str(payload))
-+        check('QR payload keeps focus scan', payload.get('scan') == 'focus')
-+        plain = json.loads(_build_invoice_qr_payload(inv, 'app', 'focus'))
-+        check('default QR payload target is invoice', plain.get('target') == 'invoice')
-+        bogus = json.loads(_build_invoice_qr_payload(inv, 'app', 'focus', 'zzz'))
-+        check('unknown target falls back to invoice', bogus.get('target') == 'invoice')
-+
-+    r = sarah_c.get('/media/qr/0001.svg?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR svg for own invoice renders', r.status_code == 200, str(r.status_code))
-+    check('QR svg is not cached publicly', 'no-store' in (r.headers.get('Cache-Control') or ''))
-+    r = anon.get('/media/qr/0001.svg?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR svg needs login', r.status_code in (302, 401, 403), str(r.status_code))
-+    r = sarah_c.get('/media/qr/0003.svg?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR svg hidden for another user\'s invoice', r.status_code == 404, str(r.status_code))
-+    r = sarah_c.get('/media/qr/0001.png?batch_id=1&mode=app&scan=focus&target=note')
-+    check('QR png for own invoice renders', r.status_code == 200, str(r.status_code))
-+
-+    # ---------------- live link lookup ----------------
-+    base = f"/invoices/link-lookup?batch_id=1&current={ids['mine']}"
-+    r = sarah_c.get(base + '&serial=0002', headers=XHR)
-+    body = r.get_json()
-+    check('lookup finds a linkable invoice', r.status_code == 200 and body.get('found') is True, str(body))
-+    inv_json = body.get('invoice', {})
-+    check('lookup returns serial, date, total, amounts',
-+          inv_json.get('serial_number') == '0002' and inv_json.get('date') == '2026-10-15'
-+          and float(inv_json.get('total_amount')) == 20.0 and inv_json.get('amounts') == [20.0],
-+          str(inv_json))
-+    check('lookup returns batch name', bool(inv_json.get('batch_name')))
-+
-+    body = sarah_c.get(base + '&serial=0003', headers=XHR).get_json()
-+    check('lookup hides an invoice the user cannot access',
-+          body.get('found') is False and '0003' in body.get('message', ''), str(body))
-+    body = sarah_c.get(base + '&serial=0001', headers=XHR).get_json()
-+    check('lookup refuses the invoice itself', body.get('found') is False and 'this invoice' in body.get('message', '').lower(), str(body))
-+    body = sarah_c.get(base + '&serial=9999', headers=XHR).get_json()
-+    check('lookup reports a missing serial', body.get('found') is False, str(body))
-+    body = sarah_c.get(base + '&serial=', headers=XHR).get_json()
-+    check('empty serial gives an empty, not-found reply', body == {'found': False, 'message': ''}, str(body))
-+    r = sarah_c.get('/invoices/link-lookup?batch_id=abc&serial=0002', headers=XHR)
-+    check('bad batch id is rejected', r.status_code == 400, str(r.status_code))
-+    r = anon.get('/invoices/link-lookup?batch_id=1&serial=0002', headers=XHR)
-+    check('lookup needs login', r.status_code in (302, 401, 403), str(r.status_code))
-+
-+    # ---------------- background note save (web, AJAX) ----------------
-+    url = f"/invoices/{ids['mine']}/notes?batch_id=1"
-+    r = sarah_c.post(url, data={'body': 'Customer confirmed by phone'}, headers=XHR)
-+    check('AJAX note with text saves', r.status_code == 200 and r.get_json().get('success') is True,
-+          f'{r.status_code} {r.get_data(as_text=True)[:200]}')
-+    r = sarah_c.post(url, data={'body': '', 'files': (io.BytesIO(b'%PDF-1.4 test'), 'scan.pdf')},
-+                     content_type='multipart/form-data', headers=XHR)
-+    check('AJAX note with a file and no text saves', r.status_code == 200 and r.get_json().get('success') is True,
-+          f'{r.status_code} {r.get_data(as_text=True)[:200]}')
-+    r = sarah_c.post(url, data={'body': '', 'files': (io.BytesIO(b'MZ'), 'tool.exe')},
-+                     content_type='multipart/form-data', headers=XHR)
-+    check('AJAX note refuses a blocked file type', r.status_code == 400 and r.get_json().get('success') is not True,
-+          f'{r.status_code}')
-+    r = sarah_c.post(url, data={'body': ''}, headers=XHR)
-+    check('AJAX empty note is refused', r.status_code == 400, str(r.status_code))
-+
-+    # ---------------- mobile API: note with attachment ----------------
-+    r = sarah_c.post('/api/v1/invoices/0001/notes?batch_id=1', headers=H,
-+                     data={'body': '', 'file': (io.BytesIO(b'%PDF-1.4 phone scan'), 'phone.pdf')},
-+                     content_type='multipart/form-data')
-+    check('mobile API: attachment-only note from phone is saved', r.status_code == 201, f'{r.status_code} {r.get_data(as_text=True)[:200]}')
-+    if r.status_code == 201:
-+        notes = r.get_json()['history']['notes']
-+        check('mobile API: the new note carries the attachment',
-+              any(n.get('attachments') and n['attachments'][0]['file_name'] == 'phone.pdf' for n in notes))
-+
-+    # ---------------- permissions still enforced ----------------
-+    with app.app_context():
-+        db.session.add(UserCapability(user_id=ids['sarah_id'], capability='notes.create', allowed=False))
-+        db.session.commit()
-+    r = sarah_c.post(url, data={'body': 'blocked'}, headers=XHR)
-+    check('AJAX note blocked when notes.create is off', r.status_code == 403, str(r.status_code))
-+    r = sarah_c.get(base + '&serial=0002', headers=XHR)
-+    check('lookup still works without notes.create', r.status_code == 200 and r.get_json().get('found') is True)
-+    with app.app_context():
-+        UserCapability.query.filter_by(user_id=ids['sarah_id']).delete()
-+        db.session.commit()
-+
-+    # ---------------- rendered invoice page ----------------
-+    r = sarah_c.get(f"/invoices/{ids['mine']}?batch_id=1")
-+    page = r.get_data(as_text=True)
-+    check('invoice page renders', r.status_code == 200, str(r.status_code))
-+    check('page has the note QR modal', 'id="noteQrModal"' in page)
-+    check('note QR image asks for target=note', 'target=note' in page and 'scan=focus' in page)
-+    check('page has the live link preview box', 'id="link-preview"' in page and 'id="link-submit"' in page)
-+    check('link and note forms submit in the background',
-+          'data-history-form id="link-form"' in page and 'data-history-form id="note-form"' in page)
-+    check('note file input no longer restricts types', 'accept=".pdf,.png' not in page)
-+
-+    print(f'\nALL {len(PASSED)} NOTE-QR / LOOKUP CHECKS PASSED')
++def check(name, ok):
++    results.append((name, bool(ok)))
++    print('PASS' if ok else 'FAIL', name, flush=True)
 +
 +
-+if __name__ == '__main__':
-+    main()
-diff -ruN -x logs -x __pycache__ base/invoiceflow-server/server/qa/screenshots/verify_ui.mjs /home/user/work/invoiceflow-server/server/qa/screenshots/verify_ui.mjs
---- base/invoiceflow-server/server/qa/screenshots/verify_ui.mjs	1970-01-01 00:00:00.000000000 +0000
-+++ /home/user/work/invoiceflow-server/server/qa/screenshots/verify_ui.mjs	2026-10-17 17:05:05.207683934 +0000
-@@ -0,0 +1,94 @@
-+// Browser checks for the link lookup, background forms and note QR (run against qa/screenshots/demo_server.py).
-+// Run:  LD_LIBRARY_PATH=<dir with al2023 libs> node verify_ui.mjs <output dir>
-+// Needs: npm i @sparticuz/chromium playwright-core
-+import chromium from '@sparticuz/chromium';
-+import { chromium as pw } from 'playwright-core';
-+import { mkdirSync } from 'node:fs';
++def login(ctx):
++    page = ctx.new_page()
++    page.goto(BASE + '/auth/login')
++    page.fill('#username', ADMIN[0])
++    page.fill('#password', ADMIN[1])
++    page.click('[type=submit]')
++    page.wait_for_load_state('networkidle')
++    return page
 +
-+const BASE = process.env.DEMO_BASE || 'http://127.0.0.1:5055';
-+const OUT = process.argv[2] || './ui-check-out';
-+mkdirSync(OUT, { recursive: true });
 +
-+const results = [];
-+function check(label, ok, extra = '') {
-+  results.push({ label, ok });
-+  console.log(ok ? 'PASS' : 'FAIL', label, ok ? '' : extra);
-+}
++def wait_live(page):
++    page.wait_for_function("document.querySelector('#live-status')?.textContent === 'Live'", timeout=20000)
 +
-+const browser = await pw.launch({ executablePath: await chromium.executablePath(), args: chromium.args, headless: true });
-+const context = await browser.newContext({ viewport: { width: 1366, height: 900 }, deviceScaleFactor: 1 });
-+const page = await context.newPage();
-+const pageErrors = [];
-+page.on('pageerror', e => pageErrors.push(String(e)));
 +
-+await page.goto(`${BASE}/auth/login`, { waitUntil: 'domcontentloaded' });
-+await page.fill('input[name=username]', 'sarah');
-+await page.fill('input[name=password]', 'Sarah@12345');
-+await Promise.all([page.waitForLoadState('domcontentloaded'), page.click('button[type=submit], input[type=submit]')]);
++# Invoice view: probe the invoice's own total. The page also shows other invoices in its
++# link list, which can change through a live region and would hide a stale main total.
++PROBES = {'/invoices/1': "document.querySelector('main .display-6')?.innerText || ''"}
 +
-+await page.goto(`${BASE}/invoices/1?batch_id=1`, { waitUntil: 'domcontentloaded' });
-+await page.waitForTimeout(800);
 +
-+// ---- link lookup preview
-+await page.evaluate(() => { window.__noReload = 'still-here'; });
-+await page.fill('#link-serial', '0003');
-+await page.waitForFunction(() => document.getElementById('link-preview')?.textContent.includes('#0003'), null, { timeout: 5000 })
-+  .catch(() => {});
-+const previewText = await page.locator('#link-preview').innerText().catch(() => '');
-+check('lookup shows the other invoice (serial and date)', previewText.includes('#0003') && previewText.includes('2026-10-15'), previewText);
-+check('lookup shows the total', /Total\s+\d+\.\d{3}/.test(previewText), previewText);
-+check('submit enabled once the invoice is found', await page.locator('#link-submit').isEnabled());
-+await page.locator('#link-form').screenshot({ path: `${OUT}/13-link-lookup-preview.png` });
++def probe(page, path):
++    return page.evaluate(PROBES.get(path, "document.querySelector('main')?.innerText || ''"))
 +
-+await page.fill('#link-serial', '9999');
-+await page.waitForFunction(() => document.getElementById('link-preview')?.textContent.includes('No invoice'), null, { timeout: 5000 })
-+  .catch(() => {});
-+check('missing serial says so', (await page.locator('#link-preview').innerText()).includes('No invoice 9999'));
-+check('submit disabled for a missing serial', !(await page.locator('#link-submit').isEnabled()));
 +
-+// ---- link without a page reload; history list updates in place
-+await page.fill('#link-serial', '0003');
-+await page.waitForFunction(() => document.getElementById('link-preview')?.textContent.includes('#0003'), null, { timeout: 5000 })
-+  .catch(() => {});
-+await page.click('#link-submit');
-+await page.waitForFunction(() => document.getElementById('link-serial')?.value === '', null, { timeout: 8000 }).catch(() => {});
-+const noReload = await page.evaluate(() => window.__noReload);
-+check('linking does not reload the page', noReload === 'still-here', String(noReload));
-+check('form clears after a successful link', (await page.locator('#link-serial').inputValue()) === '');
-+// The list refreshes in the background after the form clears; wait for it (no reload).
-+await page.waitForFunction(() => document.getElementById('invoice-history')?.innerText.includes('0003'), null, { timeout: 8000 })
-+  .catch(() => {});
-+const historyText = await page.locator('#invoice-history').innerText();
-+check('history shows the new link without a page reload', historyText.includes('0003') && noReload === 'still-here', historyText.slice(0, 300));
++with sync_playwright() as pw:
++    launch = {'args': ['--no-sandbox']}
++    if os.environ.get('CHROMIUM_PATH'):
++        launch['executable_path'] = os.environ['CHROMIUM_PATH']
++    browser = pw.chromium.launch(**launch)
++    ctx = browser.new_context(viewport={'width': 1366, 'height': 900})
++    page_errors = []
++    login(ctx)
 +
-+// ---- typed text survives a background refresh
-+await page.fill('#note-form textarea[name=body]', 'draft note 123 — keep me');
-+await page.evaluate(() => window.InvoiceLive && window.InvoiceLive.refresh());
-+await page.waitForTimeout(1200);
-+const draft = await page.locator('#note-form textarea[name=body]').inputValue();
-+check('typed note text is not wiped by a background refresh', draft === 'draft note 123 — keep me', draft);
++    # 1) Background content updates
++    for path in PAGES:
++        page = ctx.new_page()
++        page.on('pageerror', lambda e: page_errors.append(str(e)[:200]))
++        page.goto(BASE + path)
++        page.wait_for_load_state('networkidle')
++        try:
++            wait_live(page)
++        except Exception:
++            check(f'{path}: live status reached', False)
++            page.close()
++            continue
++        before = probe(page, path)
++        external_write()
++        started = time.time()
++        updated = False
++        while time.time() - started < 12:
++            if probe(page, path) != before:
++                updated = True
++                break
++            page.wait_for_timeout(300)
++        check(f'{path}: updates without reload ({time.time() - started:.1f}s)', updated)
++        page.close()
 +
-+// ---- note saved in the background; the notes list updates without a reload
-+await page.fill('#note-form textarea[name=body]', 'Phone check note');
-+await page.click('#note-form button[type=submit]');
-+await page.waitForFunction(() => document.getElementById('live-notes')?.innerText.includes('Phone check note'), null, { timeout: 8000 })
-+  .catch(() => {});
-+check('note list updates in the background',
-+  (await page.locator('#live-notes').innerText()).includes('Phone check note') && (await page.evaluate(() => window.__noReload)) === 'still-here');
-+check('note form clears after saving', (await page.locator('#note-form textarea[name=body]').inputValue()) === '');
++    # 2) Draft safety
++    page = ctx.new_page()
++    page.goto(BASE + '/invoices/1')
++    wait_live(page)
++    page.fill('#note-form textarea[name=body]', 'DRAFT-NOTE-KEEP')
++    page.focus('#note-form textarea[name=body]')
++    external_write()
++    page.wait_for_timeout(5000)
++    check('note draft kept after background refresh',
++          page.input_value('#note-form textarea[name=body]') == 'DRAFT-NOTE-KEEP')
++    check('focused field keeps focus', page.evaluate("document.activeElement?.name") == 'body')
++    page.close()
 +
-+// ---- note QR modal
-+await page.getByRole('button', { name: /Note QR/ }).click();
-+await page.waitForTimeout(700);
-+const src = await page.locator('#noteQrModal img').getAttribute('src');
-+check('note QR points at target=note focus QR', !!src && src.includes('target=note') && src.includes('scan=focus'), String(src));
-+const qrOk = await page.evaluate(async (s) => (await fetch(s, { credentials: 'same-origin' })).ok, src);
-+check('note QR image loads for the signed-in user', qrOk);
-+await page.locator('#noteQrModal .modal-content').screenshot({ path: `${OUT}/14-note-qr-modal.png` });
++    page = ctx.new_page()
++    page.goto(BASE + '/invoices/1/edit')
++    wait_live(page)
++    page.locator('.amount-field-input').first.fill('555.125')
++    page.evaluate("window.__marker = 'alive'")
++    external_write()
++    page.wait_for_timeout(5000)
++    check('editor amount draft kept', page.locator('.amount-field-input').first.input_value() == '555.125')
++    check('editor was not reloaded', page.evaluate("window.__marker") == 'alive')
++    page.close()
++    check('no page errors', not page_errors)
++    browser.close()
 +
-+check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
++failed = [name for name, ok in results if not ok]
++print(f'\n{len(results) - len(failed)}/{len(results)} checks passed')
++sys.exit(1 if failed else 0)
+diff -ruN -x __pycache__ pa/invoiceflow-server/server/qa/sqlite_harness.py pb/invoiceflow-server/server/qa/sqlite_harness.py
+--- a/invoiceflow-server/server/qa/sqlite_harness.py	2026-10-17 17:51:09.198065672 +0000
++++ b/invoiceflow-server/server/qa/sqlite_harness.py	2026-10-17 17:51:09.206065712 +0000
+@@ -3,6 +3,8 @@
+ Runs the real app code against SQLite. Patches just the MySQL-only startup gates
+ (URL validation and information_schema / trigger verification). Never used for production.
+ """
 +
-+await browser.close();
-+const failed = results.filter(r => !r.ok);
-+console.log(`\n${results.length - failed.length}/${results.length} UI checks passed`);
-+process.exit(failed.length ? 1 : 0);
++import datetime
+ import os
+ import re
+ import sys
+@@ -50,6 +52,33 @@
+         dbapi_conn.create_function(
+             'regexp', 2,
+             lambda pat, val: 1 if val is not None and re.search(pat, str(val)) else 0)
++        # MySQL-compatible helpers used by reporting queries (summary/monthly totals).
++        def _concat(*parts):
++            return None if any(p is None for p in parts) else ''.join(str(p) for p in parts)
++        def _lpad(val, length, pad):
++            if val is None:
++                return None
++            text = str(val)
++            return text[:length] if len(text) >= length else (str(pad) * length + text)[-length:]
++        dbapi_conn.create_function('concat', -1, _concat)
++        dbapi_conn.create_function('lpad', 3, _lpad)
++        def _date_format(value, fmt):
++            # MySQL DATE_FORMAT subset used by analytics ('%Y-%m', '%Y-%m-%d').
++            if value is None:
++                return None
++            text = str(value)[:10]
++            return datetime.date.fromisoformat(text).strftime(fmt)
++        dbapi_conn.create_function('date_format', 2, _date_format)
++        def _dayname(value):
++            if value is None:
++                return None
++            return datetime.date.fromisoformat(str(value)[:10]).strftime('%A')
++        dbapi_conn.create_function('dayname', 1, _dayname)
++        def _hour(value):
++            if value is None:
++                return None
++            return datetime.datetime.fromisoformat(str(value)).hour
++        dbapi_conn.create_function('hour', 1, _hour)
+ 
+ 
+ class TestCfg(Config):
