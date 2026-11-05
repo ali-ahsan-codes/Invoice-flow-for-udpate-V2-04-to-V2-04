@@ -109,3 +109,21 @@ Test: `qa/admin_all_batch_search_test.py` (18 checks, SQLite harness). Browser c
 Regression after this round: permissions 67/67, exclusion and mobile API 47/47, invoice history 79/79, note QR and lookup 32/32, mobile QR contract 3/3.
 
 Date and book summary cards under all-batch search add totals across all batches and say so in their subtitle. The "Full Details" link is hidden for a book that belongs to another batch, because the book page only opens the current batch.
+
+## Round 7: administrator export covers every batch, Export Data card layout
+
+Problem: an administrator exporting a date range (Daily Totals, Monthly Total, Date-Wise Summary, All Invoices, Export Books) got only the batch on screen. The Export Data card also overlapped: the second Daily Totals date box sat over the Monthly Total picker at desktop width.
+
+Change:
+- Administrator exports cover every batch for all types except the blank template. File names start with `all_batches_`. Rows from aggregates (daily, monthly, date-wise) are not stamped with the current batch.
+- Data-entry users: unchanged. Their exports stay on the current batch, and the `batch_<id>_` file name and Batch ID column stay.
+- Small fix: the blank separator row before a TOTAL line was stamped with a batch id for data-entry exports. It stays blank now.
+- Export Data card: date pairs wrap inside their own box, and the controls no longer overlap at 1366, 900 or 390 px.
+
+Tests:
+- `qa/admin_export_all_batches_test.py`: 13 checks (admin all types, date range totals, file names, books, data-entry scope). Passes on SQLite.
+- `qa/batch_test.py` (MySQL suite) assertion changed to the new admin daily file name. Not run here (needs MySQL).
+- Regression: admin search 18/18, invoice history 79/79, permissions 67/67, exclusion and mobile API 47/47, note QR 32/32, mobile QR contract 3/3.
+- Browser (headless Chromium, admin account): overlap check on the Export Data card. Before: `daily-to` overlaps `month-picker`. After: none at 1366, 900 and 390 px. Screenshots: `docs/screenshots/16-export-card-before.png`, `docs/screenshots/17-export-card-after.png`.
+
+Known limit: "Export All" still has no date range. It exports every batch (for administrators) in full.
